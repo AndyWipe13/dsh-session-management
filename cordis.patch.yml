@@ -1,0 +1,4 @@
+- insert:
+    - id: session-management
+      name: '@dsh-external/dsh-session-management'
+      config: {}
