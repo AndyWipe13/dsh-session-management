@@ -21,6 +21,9 @@
   },
   "scripts": {
     "build": "node scripts/build.js",
+    "pretest": "npm run build",
+    "test": "node --test --test-isolation=none \"test/*.test.js\"",
+    "pretypecheck": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dsh": {

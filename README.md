@@ -20,6 +20,24 @@ npm run build
 
 产物输出到 `lib/`（入口 `lib/index.js`，类型 `lib/types/index.d.ts`）。
 
+## 工程基线验证
+
+无 DSH 源码 checkout 的 Windows 环境（依赖 `~/.dsh/profiles/node_modules` 官方依赖镜像）可直接跑：
+
+```bash
+npm run build       # 编译 src -> lib
+npm run typecheck   # TypeScript 类型检查（自动先 build 链接依赖）
+npm test            # 运行测试（自动先 build）
+```
+
+测试使用 Node 内置 test runner（`--test-isolation=none`），覆盖：
+
+- 插件基线导出与 bundle 装配自检（hello 占位工具已移除）；
+- fake 官方服务装配能力（`sessions` / `sessionQuery` / `sessionPersistence` / `workspaceRegistry` / `storageDomain`）；
+- 只读夹具银行（Claude Code、Codex 含 archived_sessions、DSH 各 ≥2 个，含空会话/坏行/中文 Unicode/subagent 边界样本）。
+
+夹具位于 `test/fixtures/`，任何测试前后不得修改其字节与 mtime；生成脚本见 `scripts/generate-fixtures.js`。
+
 ## 本地装配到 profile
 
 ```bash

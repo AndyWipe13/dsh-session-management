@@ -1,59 +1,21 @@
 /**
- * @dsh-external/dsh-session-management — 工具包形态（由 dev_scaffold_plugin 生成）。
- * 规范：资源注册必须挂 ctx.effect（热重载/卸载自动清理——注入器踩坑记录）。
+ * @dsh-external/dsh-session-management — 会话管理插件。
  *
- * 高性能铁律（DeepSeek V4 Pro 实测，参考 dsh-anchored-standard 98/99）：
- * 1. 工具 schema 精简：description 用短句点明用途，详解放 tool result / 静态引导文本，
- *    不要写进 schema——工具目录按字符计费进首轮 prefill，实测 6 插件可膨胀到 17.6 万字符，
- *    稀释首轮注意力且无缓存 prefill 最贵（缓存命中便宜 10 倍）。
- * 2. 首轮锚定：工具面大（≥5 个）时首轮只露最核心的 1-2 个工具，首个工具调用后恢复全部——
- *    首轮请求结构决定整条会话的策略轨迹，锚定在训练对齐的窄工具面再放开，能力不损。
- *    启用方法见 apply() 末尾的注释块。
+ * 当前为工程基线切片（issue #2）：
+ * - 已移除脚手架 hello 占位工具；
+ * - 插件保持可构建、可装配、可卸载的干净入口；
+ * - 后续切片将在此注册 SessionManagement 服务、设置页与 Agent 工具。
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { defineTool } from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
 
-export const name = "@dsh-external/dsh-session-management"
-export const inject = ['tools']
+export const name = '@dsh-external/dsh-session-management'
+export const inject: string[] = []
 
-export interface Config {
-  greeting: string
-}
+export interface Config {}
 
-export const Config = z.object({
-  greeting: z.string().default('你好'),
-})
+export const Config = z.object({})
 
-export function apply(ctx: Context, config: Config): void {
-  // 工具注册（ctx.effect：fiber dispose 自动注销）
-  ctx.effect(() => ctx.tools.register(defineTool({
-    name: '_dsh_external_dsh_session_management_hello',
-    description: "Manage DeepSeek Harness sessions: delete legacy sessions and import sessions from Claude Code/Codex",
-    parameters: {
-      name: { type: 'string', required: true, description: '谁' },
-    },
-    output: {
-      schema: { type: 'string' },
-      render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
-    },
-    async execute(args: { name: string }) {
-      return config.greeting + '，' + args.name + '！'
-    },
-  })), '@dsh-external/dsh-session-management: hello tool')
-
-  // ── 高性能引导：首轮锚定（工具面 ≥5 个或 description 总量大时启用）──────────
-  // 机制：system-prompt/assemble 是 Waterfall（必须 await next() 再裁剪）；
-  // 会话无任何持久化 tool/call 前，只保留本插件最核心的工具；首个工具调用落地后
-  // 恢复全部。阶段从持久 session events 推导，resume/reload 不丢状态。
-  // 启用步骤：① inject 数组加 'systemPrompt'；② 把下方 MINE 换成你的工具名集合；
-  // ③ 把 '<核心工具>' 换成首轮要保留的那个工具名。
-  // ctx.on('system-prompt/assemble', async (_assembly: unknown, context: any, next: () => Promise<any>) => {
-  //   const assembled = await next()
-  //   const agent = context.agent
-  //   if (!agent || agent.session.events.some((e: any) => e.type === 'tool/call')) return assembled
-  //   const MINE = new Set(['_dsh_external_dsh_session_management_hello'])
-  //   const CORE = '<核心工具>'
-  //   return { ...assembled, tools: assembled.tools.filter((t: any) => !MINE.has(t.name) || t.name === CORE) }
-  // })
+export function apply(_ctx: Context, _config: Config): void {
+  // 基线切片暂无业务注册；后续功能全部挂 ctx.effect，热重载/卸载自动清理。
 }

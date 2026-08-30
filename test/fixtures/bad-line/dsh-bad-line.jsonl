@@ -1,0 +1,6 @@
+{"type":"session","version":0,"id":"session-00000000-0000-0000-0000-00000064","createdAt":1787234947081,"cwd":"C:\\fixture\\project","delegationDepth":0,"agentPreset":"standard"}
+{"type":"permission/preset","seq":0,"time":1787234947093,"data":{"preset":"workspace-write"}}
+{"type":"sandbox/mode","seq":1,"time":1787234947093,"data":{"mode":"workspace-write"}}
+{"type":"approval/policy","seq":2,"time":1787234947094,"data":{"policy":"ask"}}
+{"type":"agent-preset/selected","seq":3,"time":1787234952455,"data":{"agentPreset":"router-standard"}}
+this line is not json
