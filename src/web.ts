@@ -1,9 +1,9 @@
 /**
  * Host HTTP API backing the settings-page thin UI.
  *
- * The client half is a small DOM/React adapter; all read logic stays in
- * `SessionManagementService`.  This file only maps HTTP GET requests to
- * service calls and serializes the canonical JSON result.
+ * The client half is a small DOM/React adapter; all business logic stays in
+ * `SessionManagementService`.  This file maps HTTP GET read requests and
+ * POST archive/unarchive requests to service calls and serializes JSON.
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -39,6 +39,33 @@ function parseQuery(url: string | undefined): URLSearchParams {
   } catch {
     return new URLSearchParams()
   }
+}
+
+function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    let raw = ''
+    req.setEncoding('utf8')
+    req.on('data', (chunk: string) => {
+      raw += chunk
+      if (raw.length > 1024 * 1024) {
+        reject(new Error('Request body too large'))
+        req.destroy()
+      }
+    })
+    req.on('end', () => {
+      if (!raw) {
+        resolve({})
+        return
+      }
+      try {
+        const parsed = JSON.parse(raw)
+        resolve(typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : {})
+      } catch {
+        reject(new Error('Invalid JSON body'))
+      }
+    })
+    req.on('error', reject)
+  })
 }
 
 function toBoolean(value: string | null): boolean | 'all' | undefined {
@@ -83,6 +110,28 @@ export function registerSessionApi(ctx: { webServer?: WebServerLike }, service: 
           }
           const result = await service.preview(id)
           sendJson(res, 200, result)
+          return
+        }
+
+        if (path === `${API_PREFIX}/archive` || path === `${API_PREFIX}/unarchive`) {
+          if (req.method !== 'POST') {
+            sendError(res, 405, 'Method not allowed')
+            return
+          }
+          const body = await readJsonBody(req)
+          const sessionId = typeof body.sessionId === 'string'
+            ? body.sessionId
+            : typeof body.id === 'string' ? body.id : undefined
+          if (!sessionId) {
+            sendError(res, 400, 'Missing sessionId')
+            return
+          }
+          if (path === `${API_PREFIX}/archive`) {
+            await service.archive(sessionId)
+          } else {
+            await service.unarchive(sessionId)
+          }
+          sendJson(res, 200, { ok: true, sessionId })
           return
         }
 

@@ -1,5 +1,5 @@
 /**
- * Read-only Agent tools for dsh-session-management.
+ * Agent tools for dsh-session-management.
  *
  * These tools are deliberately thin: they parse/validate args, call the
  * SessionManagement service, and render the canonical result for the model.
@@ -47,7 +47,7 @@ function formatPreview(value: Awaited<ReturnType<SessionManagementService['previ
   return lines.join('\n')
 }
 
-export function registerReadOnlyTools(ctx: ToolContext, service: SessionManagementService): () => void {
+export function registerSessionTools(ctx: ToolContext, service: SessionManagementService): () => void {
   const disposers: Array<() => void> = []
   const register = (tool: unknown): void => {
     disposers.push(ctx.tools.register(tool))
@@ -143,6 +143,50 @@ export function registerReadOnlyTools(ctx: ToolContext, service: SessionManageme
     },
     async execute(args: { sessionId: string }) {
       return service.preview(args.sessionId)
+    },
+  }))
+
+  register(define({
+    name: 'archive_session',
+    description: 'Archive one DSH session through the official workspace registry. Reversible; no approval required.',
+    parameters: {
+      sessionId: {
+        type: 'string',
+        description: 'DSH session id to archive.',
+        required: true,
+      },
+    },
+    output: {
+      schema: { type: 'json' },
+      render: (_args: unknown, value: { sessionId: string; archived: boolean }) => [
+        { type: 'text', text: `Archived session ${value.sessionId}.` },
+      ],
+    },
+    async execute(args: { sessionId: string }) {
+      await service.archive(args.sessionId)
+      return { sessionId: args.sessionId, archived: true }
+    },
+  }))
+
+  register(define({
+    name: 'unarchive_session',
+    description: 'Unarchive one DSH session through the internal workspace registry channel. Reversible; no approval required.',
+    parameters: {
+      sessionId: {
+        type: 'string',
+        description: 'DSH session id to unarchive.',
+        required: true,
+      },
+    },
+    output: {
+      schema: { type: 'json' },
+      render: (_args: unknown, value: { sessionId: string; archived: boolean }) => [
+        { type: 'text', text: `Unarchived session ${value.sessionId}.` },
+      ],
+    },
+    async execute(args: { sessionId: string }) {
+      await service.unarchive(args.sessionId)
+      return { sessionId: args.sessionId, archived: false }
     },
   }))
 

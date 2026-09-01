@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { apply } from '../lib/index.js'
 import { createFakeContext } from './helpers/fake-services.js'
 
-test('read-only tools are registered and call the service', async () => {
+test('session tools are registered and call the service', async () => {
   const ctx = createFakeContext()
   ctx.sessionQuery.listSessions = async () => [
     { header: { id: 's1', createdAt: 1000, cwd: 'C:/work' }, live: false, persisted: true, blank: false },
@@ -17,7 +17,7 @@ test('read-only tools are registered and call the service', async () => {
 
   assert.deepEqual(
     ctx.$registeredTools.map((tool) => tool.name),
-    ['list_sessions', 'search_sessions', 'preview_session'],
+    ['list_sessions', 'search_sessions', 'preview_session', 'archive_session', 'unarchive_session'],
   )
 
   const listTool = ctx.$registeredTools.find((tool) => tool.name === 'list_sessions')
@@ -38,4 +38,12 @@ test('read-only tools are registered and call the service', async () => {
   const previewResult = await previewTool.execute({ sessionId: 's1' })
   assert.equal(previewResult.id, 's1')
   assert.equal(previewResult.events.length, 1)
+
+  const archiveTool = ctx.$registeredTools.find((tool) => tool.name === 'archive_session')
+  const archiveResult = await archiveTool.execute({ sessionId: 's1' })
+  assert.deepEqual(archiveResult, { sessionId: 's1', archived: true })
+
+  const unarchiveTool = ctx.$registeredTools.find((tool) => tool.name === 'unarchive_session')
+  const unarchiveResult = await unarchiveTool.execute({ sessionId: 's1' })
+  assert.deepEqual(unarchiveResult, { sessionId: 's1', archived: false })
 })

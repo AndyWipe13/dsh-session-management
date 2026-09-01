@@ -192,13 +192,38 @@ export function createFakeContext(overrides = {}) {
     },
   }
 
-  const workspaceRegistry = {
+  const workspaceState = {
+    initialized: true,
+    workspaceIds: [],
     archivedSessionIds: [],
+  }
+  let operationTail = Promise.resolve()
+  const workspaceRegistry = {
+    get archivedSessionIds() {
+      return workspaceState.archivedSessionIds
+    },
+    set archivedSessionIds(value) {
+      workspaceState.archivedSessionIds = value
+    },
     archiveSession: async (sessionId) => {
       calls.workspaceRegistry.push({ op: 'archiveSession', args: [sessionId] })
-      if (!workspaceRegistry.archivedSessionIds.includes(sessionId)) {
-        workspaceRegistry.archivedSessionIds.push(sessionId)
+      if (!workspaceState.archivedSessionIds.includes(sessionId)) {
+        workspaceState.archivedSessionIds.push(sessionId)
       }
+    },
+    enqueueOperation(operation) {
+      calls.workspaceRegistry.push({ op: 'enqueueOperation' })
+      const result = operationTail.then(() => operation())
+      operationTail = result.then(() => {}, () => {})
+      return result
+    },
+    requireState() {
+      calls.workspaceRegistry.push({ op: 'requireState' })
+      return workspaceState
+    },
+    async setState(state) {
+      calls.workspaceRegistry.push({ op: 'setState', args: [state] })
+      Object.assign(workspaceState, state)
     },
     create: async (path, title) => {
       calls.workspaceRegistry.push({ op: 'create', args: [path, title] })
@@ -209,6 +234,7 @@ export function createFakeContext(overrides = {}) {
     delete: async () => true,
     insertBefore: async () => [],
     resolveByPath: async () => undefined,
+    $state: workspaceState,
   }
 
   const openDomains = new Map()

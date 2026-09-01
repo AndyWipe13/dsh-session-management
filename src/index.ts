@@ -4,14 +4,14 @@
  * Issue #3 落地读路径全栈：
  * - SessionManagement 服务面（list/search/preview）作为单一测试接缝；
  * - import manifest 存储单元（初始为空）用于来源反查；
- * - 只读 Agent 工具 list_sessions / search_sessions / preview_session；
+ * - Agent 工具 list_sessions / search_sessions / preview_session / archive_session / unarchive_session；
  * - Host HTTP API 供设置页薄 UI 消费（client 半区见 client.js）。
  */
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { openManifestStore } from './manifest.js'
 import { createSessionManagementService } from './service.js'
-import { registerReadOnlyTools } from './tools.js'
+import { registerSessionTools } from './tools.js'
 import { registerSessionApi } from './web.js'
 
 export const name = '@dsh-external/dsh-session-management'
@@ -37,6 +37,6 @@ export function apply(ctx: Context, _config: Config): void {
     void manifest.close()
   }, '@dsh-external/dsh-session-management: import manifest')
 
-  ctx.effect(() => registerReadOnlyTools(services, service), '@dsh-external/dsh-session-management: read-only tools')
+  ctx.effect(() => registerSessionTools(services, service), '@dsh-external/dsh-session-management: session tools')
   ctx.effect(() => registerSessionApi(services, service), '@dsh-external/dsh-session-management: settings api')
 }

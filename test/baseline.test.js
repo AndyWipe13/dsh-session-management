@@ -22,12 +22,12 @@ test('bundle patch points at the built plugin module', () => {
   assert.ok(fs.existsSync(path.join(repoRoot, 'lib', 'index.js')), 'lib/index.js must exist after build')
 })
 
-test('plugin applies cleanly and registers read-only tools and settings api', () => {
+test('plugin applies cleanly and registers session tools and settings api', () => {
   const ctx = createFakeContext()
   assert.doesNotThrow(() => apply(ctx, {}))
   assert.deepEqual(
     ctx.$registeredTools.map((tool) => tool.name),
-    ['list_sessions', 'search_sessions', 'preview_session'],
+    ['list_sessions', 'search_sessions', 'preview_session', 'archive_session', 'unarchive_session'],
   )
   assert.equal(
     ctx.$registeredTools.some((tool) => tool.name === '_dsh_external_dsh_session_management_hello'),

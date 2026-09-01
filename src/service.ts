@@ -66,6 +66,10 @@ export interface SessionServiceContext {
   }
   workspaceRegistry?: {
     archivedSessionIds?: readonly string[] | Set<string>
+    archiveSession?(sessionId: string): Promise<void> | void
+    enqueueOperation?(operation: () => Promise<void> | void): Promise<unknown>
+    requireState?(): { workspaceIds?: readonly unknown[]; archivedSessionIds?: readonly string[] } | undefined
+    setState?(state: unknown): Promise<unknown> | unknown
   }
   sessions?: {
     get?(id: string): unknown
@@ -123,6 +127,26 @@ function archivedSetOf(workspaceRegistry: SessionServiceContext['workspaceRegist
   if (!raw) return new Set()
   if (Array.isArray(raw)) return new Set(raw)
   return raw instanceof Set ? raw : new Set()
+}
+
+const DSH_RC_VERSION = '0.1.0-rc.7'
+const UNARCHIVE_CHANNEL_VERSION = 1
+
+/** The rc.7 workspaceRegistry internal channel face required by ADR-0001. */
+interface UnarchiveWorkspaceRegistry {
+  enqueueOperation(operation: () => Promise<void> | void): Promise<unknown>
+  requireState(): { initialized?: boolean; workspaceIds?: readonly unknown[]; archivedSessionIds?: readonly string[] }
+  setState(state: unknown): Promise<unknown> | unknown
+}
+
+function requireUnarchiveChannel(registry: SessionServiceContext['workspaceRegistry']): UnarchiveWorkspaceRegistry {
+  if (!registry || typeof registry.enqueueOperation !== 'function' || typeof registry.requireState !== 'function' || typeof registry.setState !== 'function') {
+    throw new Error(
+      `workspaceRegistry.unarchive internal channel is unavailable: expected enqueueOperation/requireState/setState ` +
+      `(DSH ${DSH_RC_VERSION}, channel v${UNARCHIVE_CHANNEL_VERSION})`,
+    )
+  }
+  return registry as unknown as UnarchiveWorkspaceRegistry
 }
 
 export class SessionManagementService {
@@ -215,6 +239,47 @@ export class SessionManagementService {
       archived,
       events: normalized.events,
     }
+  }
+
+  /** Archive one session through the official workspace registry API. */
+  async archive(sessionId: string): Promise<void> {
+    const registry = this.ctx.workspaceRegistry
+    if (!registry || typeof registry.archiveSession !== 'function') {
+      throw new Error(`workspaceRegistry.archiveSession is unavailable (DSH ${DSH_RC_VERSION})`)
+    }
+    await registry.archiveSession(sessionId)
+  }
+
+  /**
+   * Unarchive one session through the ADR-0001 internal channel.
+   *
+   * The channel is shape/version guarded: a missing or damaged internal face
+   * fails loudly before any write. Repeated unarchive of an already-active
+   * session is a no-op.
+   */
+  async unarchive(sessionId: string): Promise<void> {
+    const registry = requireUnarchiveChannel(this.ctx.workspaceRegistry)
+    await registry.enqueueOperation(async () => {
+      const state = registry.requireState()
+      if (
+        !state ||
+        typeof state.initialized !== 'boolean' ||
+        !Array.isArray(state.archivedSessionIds) ||
+        state.archivedSessionIds.some((id) => typeof id !== 'string') ||
+        !Array.isArray(state.workspaceIds) ||
+        state.workspaceIds.some((id) => typeof id !== 'string')
+      ) {
+        throw new Error(
+          `workspaceRegistry unarchive internal channel state is invalid: expected initialized boolean, workspaceIds string[], archivedSessionIds string[] ` +
+          `(DSH ${DSH_RC_VERSION}, channel v${UNARCHIVE_CHANNEL_VERSION})`,
+        )
+      }
+      if (!state.archivedSessionIds.includes(sessionId)) return
+      await registry.setState({
+        ...state,
+        archivedSessionIds: state.archivedSessionIds.filter((id) => id !== sessionId),
+      })
+    })
   }
 
   private async sourceOf(id: string): Promise<SessionSource> {

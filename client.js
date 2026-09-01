@@ -19,15 +19,25 @@ window.__ModuleLoader__.load({
 
     const API = '/@dsh-external/dsh-session-management/api'
 
+    function readJson(res) {
+      if (!res.ok) {
+        return res.json().then((body) => {
+          throw new Error((body && body.error) || `HTTP ${res.status}`)
+        })
+      }
+      return res.json()
+    }
+
     function fetchJson(url) {
-      return fetch(url).then((res) => {
-        if (!res.ok) {
-          return res.json().then((body) => {
-            throw new Error((body && body.error) || `HTTP ${res.status}`)
-          })
-        }
-        return res.json()
-      })
+      return fetch(url).then(readJson)
+    }
+
+    function postJson(url, body) {
+      return fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      }).then(readJson)
     }
 
     function formatBytes(bytes) {
@@ -59,6 +69,8 @@ window.__ModuleLoader__.load({
       const [items, setItems] = useState([])
       const [preview, setPreview] = useState(null)
       const [error, setError] = useState(null)
+      const [notice, setNotice] = useState(null)
+      const [busyId, setBusyId] = useState(null)
       const [loading, setLoading] = useState(false)
 
       const load = useCallback(() => {
@@ -87,6 +99,21 @@ window.__ModuleLoader__.load({
           .catch((err) => setError(String(err.message || err)))
           .finally(() => setLoading(false))
       }, [])
+
+      const runArchiveAction = useCallback((id, action) => {
+        setBusyId(id)
+        setError(null)
+        setNotice(null)
+        postJson(`${API}/${action}`, { sessionId: id })
+          .then(() => {
+            setNotice(action === 'unarchive'
+              ? '已取消归档，本列表已更新；内置侧栏将在页面刷新后收敛。'
+              : '已归档，本列表已更新。')
+            load()
+          })
+          .catch((err) => setError(String(err.message || err)))
+          .finally(() => setBusyId(null))
+      }, [load])
 
       const sourceOptions = ['all', 'dsh', 'claude-code', 'codex']
       const archivedOptions = [['all', '全部'], ['false', '活跃'], ['true', '已归档']]
@@ -128,15 +155,16 @@ window.__ModuleLoader__.load({
           React.createElement('button', { onClick: load }, '刷新'),
         ),
         error ? React.createElement('div', { style: { color: 'red', marginBottom: '8px' } }, String(error)) : null,
+        notice ? React.createElement('div', { style: { color: '#1a7f37', marginBottom: '8px' } }, notice) : null,
         loading && !preview ? React.createElement('div', null, '加载中…') : null,
         React.createElement('table', { style: { borderCollapse: 'collapse', width: '100%' } },
           React.createElement('thead', null,
             React.createElement('tr', null,
-              ['标题', '来源', '最后活跃', '大小', '消息数', '状态'].map((label) =>
+              ['标题', '来源', '最后活跃', '大小', '消息数', '状态', '操作'].map((label) =>
                 React.createElement('th', { key: label, style: { border: '1px solid #ccc', padding: '4px', textAlign: 'left' } }, label)))),
           React.createElement('tbody', null,
             items.length === 0
-              ? React.createElement('tr', null, React.createElement('td', { colSpan: 6, style: { padding: '8px' } }, '没有会话'))
+              ? React.createElement('tr', null, React.createElement('td', { colSpan: 7, style: { padding: '8px' } }, '没有会话'))
               : items.map((item) =>
                 React.createElement('tr', {
                   key: item.id,
@@ -150,7 +178,26 @@ window.__ModuleLoader__.load({
                   React.createElement('td', { style: { padding: '4px' } }, String(item.messageCount)),
                   React.createElement('td', { style: { padding: '4px' } },
                     [item.running ? '运行中' : '', item.archived ? '已归档' : ''].filter(Boolean).join(', ') || '—'),
+                  React.createElement('td', { style: { padding: '4px' } },
+                    item.archived
+                      ? React.createElement('button', {
+                          onClick: (event) => {
+                            event.stopPropagation()
+                            runArchiveAction(item.id, 'unarchive')
+                          },
+                          disabled: busyId === item.id,
+                          style: { padding: '2px 8px' },
+                        }, busyId === item.id ? '处理中…' : '取消归档')
+                      : React.createElement('button', {
+                          onClick: (event) => {
+                            event.stopPropagation()
+                            runArchiveAction(item.id, 'archive')
+                          },
+                          disabled: busyId === item.id,
+                          style: { padding: '2px 8px' },
+                        }, busyId === item.id ? '处理中…' : '归档')),
                 )))),
+        React.createElement('div', { style: { marginTop: '4px', color: '#777', fontSize: '12px' } }, '取消归档经内部通道：本列表即时更新，内置侧栏在刷新后收敛。'),
         preview ? React.createElement('div', { style: { marginTop: '12px', borderTop: '1px solid #ccc', paddingTop: '8px' } },
           React.createElement('h3', null, `预览：${preview.title || preview.id}`),
           React.createElement('button', { onClick: () => setPreview(null) }, '关闭预览'),
