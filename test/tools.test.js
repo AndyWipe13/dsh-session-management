@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { apply } from '../lib/index.js'
+import { registerSessionTools } from '../lib/tools.js'
 import { createFakeContext } from './helpers/fake-services.js'
 
 test('session tools are registered and call the service', async () => {
@@ -57,4 +58,37 @@ test('session tools are registered and call the service', async () => {
   )
   assert.equal(decision.kind, 'ask')
   assert.match(decision.reason, /s1/)
+})
+
+test('import_sessions tool dispatches Claude Code and Codex based on source', async () => {
+  const ctx = createFakeContext()
+  const calls = []
+  const service = {
+    importClaude: async (selections, root) => {
+      calls.push(['claude', selections, root])
+      return { items: [], success: 0, skipped: 0, failed: 0 }
+    },
+    importCodex: async (selections, root) => {
+      calls.push(['codex', selections, root])
+      return { items: [], success: 0, skipped: 0, failed: 0 }
+    },
+  }
+  const dispose = registerSessionTools(ctx, service)
+  try {
+    const tool = ctx.$registeredTools.find((entry) => entry.name === 'import_sessions')
+    assert.ok(tool, 'import_sessions should be registered')
+    assert.match(JSON.stringify(tool.parameters), /claude-code/)
+    assert.match(JSON.stringify(tool.parameters), /codex/)
+
+    await tool.execute({ sourceSessionIds: ['s1'] })
+    assert.deepEqual(calls, [['claude', [{ sourceSessionId: 's1' }], undefined]])
+
+    await tool.execute({ source: 'codex', sourceSessionIds: ['s2'], root: 'C:/codex' })
+    assert.deepEqual(calls, [
+      ['claude', [{ sourceSessionId: 's1' }], undefined],
+      ['codex', [{ sourceSessionId: 's2' }], 'C:/codex'],
+    ])
+  } finally {
+    dispose()
+  }
 })

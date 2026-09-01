@@ -219,17 +219,22 @@ export function registerSessionTools(ctx: ToolContext, service: SessionManagemen
 
   register(define({
     name: 'import_sessions',
-    description: 'Import selected Claude Code sessions into DSH as native sessions through the official seed path. Already imported sessions are skipped.',
+    description: 'Import selected Claude Code or Codex sessions into DSH as native sessions through the official seed path. Already imported sessions are skipped.',
     parameters: {
+      source: {
+        type: 'string',
+        enum: ['claude-code', 'codex'],
+        description: 'Source to import from. Defaults to claude-code.',
+      },
       sourceSessionIds: {
         type: 'array',
         items: { type: 'string' },
-        description: 'Claude Code session ids to import, from a prior scan of the Claude Code projects directory.',
+        description: 'Session ids to import, from a prior scan of the source directory.',
         required: true,
       },
       root: {
         type: 'string',
-        description: 'Optional Claude Code projects root to scan. Defaults to plugin configuration.',
+        description: 'Optional source root to scan (Claude projects root or Codex home). Defaults to plugin configuration.',
       },
     },
     output: {
@@ -238,8 +243,11 @@ export function registerSessionTools(ctx: ToolContext, service: SessionManagemen
         { type: 'text', text: formatImportReport(value) },
       ],
     },
-    async execute(args: { sourceSessionIds: readonly string[]; root?: string }) {
-      return service.importClaude(args.sourceSessionIds.map((sourceSessionId) => ({ sourceSessionId })), args.root)
+    async execute(args: { source?: 'claude-code' | 'codex'; sourceSessionIds: readonly string[]; root?: string }) {
+      const selections = args.sourceSessionIds.map((sourceSessionId) => ({ sourceSessionId }))
+      return (args.source ?? 'claude-code') === 'codex'
+        ? service.importCodex(selections, args.root)
+        : service.importClaude(selections, args.root)
     },
   }))
 

@@ -13,12 +13,21 @@ import type {
   ClaudeSourceReader,
 } from './claude.js'
 import { convertClaudeRecords } from './claude.js'
+import type {
+  CodexConversionResult,
+  CodexSourceReader,
+} from './codex.js'
+import { applyCodexThreadTitle, convertCodexRecords } from './codex.js'
 
 export interface SessionManagementOptions {
   /** Configured Claude Code projects root; empty/undefined means caller supplies a path. */
   claudePath?: string
+  /** Configured Codex home; empty/undefined means caller supplies a path. */
+  codexPath?: string
   /** Filesystem-facing Claude reader. Defaults are supplied by the plugin entry. */
   claude?: ClaudeSourceReader
+  /** Filesystem-facing Codex reader. Defaults are supplied by the plugin entry. */
+  codex?: CodexSourceReader
   /** Filesystem-facing artifact deleter. Defaults are supplied by the plugin entry. */
   deleter?: SessionArtifactDeleter
 }
@@ -578,6 +587,145 @@ export class SessionManagementService {
     }
   }
 
+  /**
+   * Scan the configured (or caller-supplied) Codex home and return only
+   * unimported, non-subagent, non-empty main sessions from both `sessions/`
+   * and `archived_sessions/`.
+   */
+  async scanCodex(root?: string): Promise<ImportScanResult> {
+    const files = await this.scanCodexFiles(root)
+    files.sort((a, b) => b.updatedAt - a.updatedAt)
+    return {
+      items: files,
+      total: files.length,
+      badLines: files.reduce((sum, item) => sum + item.badLines, 0),
+    }
+  }
+
+  /**
+   * Import one or more previously scanned Codex sessions through the official
+   * session seed path.  Already-imported sessions are skipped; bad lines are
+   * counted and do not abort the whole file.
+   */
+  async importCodex(selections: readonly ImportSelection[], root?: string): Promise<ImportReport> {
+    const reader = this.requireCodex()
+    const scanRoot = root ?? this.options.codexPath
+    if (!scanRoot) {
+      throw new Error('Codex import root is not configured; pass codexPath or scan root')
+    }
+
+    const scanned = await this.scanCodexFiles(scanRoot)
+    const byId = new Map(scanned.map((item) => [item.sourceSessionId, item]))
+    const items: ImportReportItem[] = []
+
+    for (const selection of selections) {
+      const existing = await this.manifest.getBySource('codex', selection.sourceSessionId)
+      if (existing) {
+        items.push({
+          sourceSessionId: selection.sourceSessionId,
+          path: selection.path,
+          status: 'skipped',
+          dshSessionId: existing.dshSessionId,
+          reason: 'Already imported',
+        })
+        continue
+      }
+
+      const candidate = byId.get(selection.sourceSessionId)
+      if (!candidate) {
+        items.push({
+          sourceSessionId: selection.sourceSessionId,
+          path: selection.path,
+          status: 'failed',
+          reason: 'Session is not in the unimported scan queue (already imported, subagent, empty, or not found)',
+        })
+        continue
+      }
+
+      try {
+        const parsed = await reader.readCodexFile(candidate.path)
+        const conversion = convertCodexRecords(parsed.records, {
+          knowTool: (name) => this.isKnownTool(name),
+        })
+        const dshSessionId = await this.createImportedSession(conversion)
+        await this.manifest.put({
+          source: 'codex',
+          sourceSessionId: candidate.sourceSessionId,
+          dshSessionId,
+          importedAt: Date.now(),
+        })
+        items.push({
+          sourceSessionId: candidate.sourceSessionId,
+          path: candidate.path,
+          status: 'success',
+          dshSessionId,
+          badLines: parsed.badLines,
+        })
+      } catch (error) {
+        items.push({
+          sourceSessionId: candidate.sourceSessionId,
+          path: candidate.path,
+          status: 'failed',
+          reason: error instanceof Error ? error.message : String(error),
+          badLines: 0,
+        })
+      }
+    }
+
+    return {
+      items,
+      success: items.filter((item) => item.status === 'success').length,
+      skipped: items.filter((item) => item.status === 'skipped').length,
+      failed: items.filter((item) => item.status === 'failed').length,
+    }
+  }
+
+  private requireCodex(): CodexSourceReader {
+    if (!this.options.codex) {
+      throw new Error('Codex source reader is not configured')
+    }
+    return this.options.codex
+  }
+
+  private async scanCodexFiles(root: string | undefined): Promise<ImportCandidateItem[]> {
+    const reader = this.requireCodex()
+    const scanRoot = root ?? this.options.codexPath
+    if (!scanRoot) {
+      throw new Error('Codex import root is not configured; pass codexPath or scan root')
+    }
+
+    const files = await reader.listCodexFiles(scanRoot)
+    const seen = new Map<string, ImportCandidateItem>()
+
+    for (const file of files) {
+      const parsed = await reader.readCodexFile(file)
+      if (parsed.summary.isSubagent) continue
+      if (!parsed.summary.hasRealUserMessage) continue
+      const existing = await this.manifest.getBySource('codex', parsed.summary.sourceSessionId)
+      if (existing) continue
+      if (seen.has(parsed.summary.sourceSessionId)) continue
+
+      const threadTitle = await reader.resolveTitle(scanRoot, parsed.summary.sourceSessionId)
+      const summary = applyCodexThreadTitle(parsed.summary, threadTitle)
+      const stat = await reader.stat(file)
+      seen.set(parsed.summary.sourceSessionId, {
+        source: 'codex',
+        sourceSessionId: parsed.summary.sourceSessionId,
+        path: file,
+        title: summary.title,
+        cwd: summary.cwd,
+        projectName: summary.projectName,
+        createdAt: summary.createdAt,
+        updatedAt: summary.updatedAt,
+        sizeBytes: stat.sizeBytes,
+        messageCount: summary.messageCount,
+        badLines: parsed.badLines,
+      })
+    }
+
+    return [...seen.values()]
+  }
+
   private requireClaude(): ClaudeSourceReader {
     if (!this.options.claude) {
       throw new Error('Claude source reader is not configured')
@@ -628,7 +776,7 @@ export class SessionManagementService {
     return list.some((tool) => tool.name === name)
   }
 
-  private async createImportedSession(conversion: ClaudeConversionResult): Promise<string> {
+  private async createImportedSession(conversion: ClaudeConversionResult | CodexConversionResult): Promise<string> {
     const sessions = this.ctx.sessions
     if (
       !sessions ||

@@ -330,6 +330,7 @@ window.__ModuleLoader__.load({
     }
 
     function ImportSection() {
+      const [source, setSource] = useState('claude-code')
       const [root, setRoot] = useState('')
       const [items, setItems] = useState([])
       const [selected, setSelected] = useState({})
@@ -341,15 +342,17 @@ window.__ModuleLoader__.load({
         setLoading(true)
         setError(null)
         setReport(null)
-        const params = root ? `?root=${encodeURIComponent(root)}` : ''
-        fetchJson(`${API}/scan${params}`)
+        const params = new URLSearchParams()
+        params.set('source', source)
+        if (root) params.set('root', root)
+        fetchJson(`${API}/scan?${params.toString()}`)
           .then((result) => {
             setItems(result.items || [])
             setSelected({})
           })
           .catch((err) => setError(String(err.message || err)))
           .finally(() => setLoading(false))
-      }, [root])
+      }, [source, root])
 
       useEffect(() => {
         load()
@@ -376,19 +379,29 @@ window.__ModuleLoader__.load({
         setLoading(true)
         setError(null)
         setReport(null)
-        postJson(`${API}/import`, { targets, root: root || undefined })
+        postJson(`${API}/import`, { source, targets, root: root || undefined })
           .then(setReport)
           .catch((err) => setError(String(err.message || err)))
           .finally(() => setLoading(false))
-      }, [items, selected, root])
+      }, [source, items, selected, root])
 
       const selectedCount = items.filter((item) => selected[item.sourceSessionId]).length
       const allSelected = items.length > 0 && items.every((item) => selected[item.sourceSessionId])
+      const rootPlaceholder = source === 'codex' ? 'Codex 目录（留空 = 默认 ~/.codex）' : 'Claude 项目目录（留空 = 默认）'
+      const emptyText = source === 'codex' ? '没有可导入的 Codex 会话' : '没有可导入的 Claude Code 会话'
 
       return React.createElement('div', { style: { padding: '12px', fontFamily: 'sans-serif' } },
         React.createElement('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '8px', alignItems: 'center' } },
+          React.createElement('select', {
+            value: source,
+            onChange: (event) => setSource(event.target.value),
+            style: { padding: '4px' },
+          },
+            React.createElement('option', { value: 'claude-code' }, 'Claude Code'),
+            React.createElement('option', { value: 'codex' }, 'Codex'),
+          ),
           React.createElement('input', {
-            placeholder: 'Claude 项目目录（留空 = 默认）',
+            placeholder: rootPlaceholder,
             value: root,
             onChange: (event) => setRoot(event.target.value),
             style: { padding: '4px', minWidth: '260px' },
@@ -417,7 +430,7 @@ window.__ModuleLoader__.load({
                 React.createElement('th', { key: index, style: { border: '1px solid #ccc', padding: '4px', textAlign: 'left' } }, label)))),
           React.createElement('tbody', null,
             items.length === 0
-              ? React.createElement('tr', null, React.createElement('td', { colSpan: 6, style: { padding: '8px' } }, '没有可导入的 Claude Code 会话'))
+              ? React.createElement('tr', null, React.createElement('td', { colSpan: 6, style: { padding: '8px' } }, emptyText))
               : items.map((item) =>
                 React.createElement('tr', { key: item.sourceSessionId, style: { border: '1px solid #ccc' } },
                   React.createElement('td', { style: { padding: '4px' } },

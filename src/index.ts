@@ -13,6 +13,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { openManifestStore } from './manifest.js'
 import { createClaudeSourceReader, resolveClaudeProjectsRoot } from './claude.js'
+import { createCodexSourceReader, resolveCodexHome } from './codex.js'
 import { createSessionManagementService } from './service.js'
 import { registerSessionTools } from './tools.js'
 import { registerSessionApi } from './web.js'
@@ -23,10 +24,13 @@ export const inject = ['tools', 'sessions', 'agents', 'sessionQuery', 'sessionPe
 export interface Config {
   /** Claude Code projects root. Empty means auto-detect `~/.claude/projects`. */
   claudePath?: string
+  /** Codex home. Empty means auto-detect `~/.codex`. */
+  codexPath?: string
 }
 
 export const Config = z.object({
   claudePath: z.string().default(''),
+  codexPath: z.string().default(''),
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -42,7 +46,9 @@ export function apply(ctx: Context, config: Config): void {
   const manifest = openManifestStore(services.storageDomain)
   const service = createSessionManagementService(ctx as never, manifest, {
     claudePath: resolveClaudeProjectsRoot(config.claudePath),
+    codexPath: resolveCodexHome(config.codexPath),
     claude: createClaudeSourceReader(),
+    codex: createCodexSourceReader(),
     deleter: async (location) => {
       // The persistence locate() points at the session log file; the whole
       // session directory is the DSH-side artifact we remove.

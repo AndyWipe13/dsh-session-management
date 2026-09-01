@@ -145,3 +145,51 @@ test('open HTTP route calls the service with sessionId', async () => {
   assert.deepEqual(JSON.parse(res.$state.body), { sessionId: 's1', resumed: true, alreadyRunning: false })
   dispose()
 })
+
+test('scan HTTP route dispatches Codex and Claude scans by source', async () => {
+  const calls = []
+  const service = {
+    scanClaude: async (root) => { calls.push(['claude', root]); return { items: [], total: 0, badLines: 0 } },
+    scanCodex: async (root) => { calls.push(['codex', root]); return { items: [], total: 0, badLines: 0 } },
+  }
+  const { ctx, route } = captureRoute()
+  const dispose = registerSessionApi(ctx, service)
+  const api = '/@dsh-external/dsh-session-management/api'
+
+  const req = (url) => ({ method: 'GET', url, setEncoding() {}, on() {}, destroy() {} })
+  const res1 = jsonRes()
+  await route().handler(req(`${api}/scan?source=codex&root=C%3A%5Ccodex`), res1)
+  assert.deepEqual(calls, [['codex', 'C:\\codex']])
+  assert.equal(res1.$state.status, 200)
+
+  const res2 = jsonRes()
+  await route().handler(req(`${api}/scan`), res2)
+  assert.deepEqual(calls, [['codex', 'C:\\codex'], ['claude', undefined]])
+  assert.equal(res2.$state.status, 200)
+  dispose()
+})
+
+test('import HTTP route dispatches Codex and Claude imports by body source', async () => {
+  const calls = []
+  const service = {
+    importClaude: async (targets, root) => { calls.push(['claude', targets, root]); return { items: [], success: 0, skipped: 0, failed: 0 } },
+    importCodex: async (targets, root) => { calls.push(['codex', targets, root]); return { items: [], success: 0, skipped: 0, failed: 0 } },
+  }
+  const { ctx, route } = captureRoute()
+  const dispose = registerSessionApi(ctx, service)
+  const api = '/@dsh-external/dsh-session-management/api'
+
+  const res1 = jsonRes()
+  await route().handler(jsonReq(`${api}/import`, { source: 'codex', targets: [{ sourceSessionId: 's1' }], root: 'C:/codex' }), res1)
+  assert.deepEqual(calls, [['codex', [{ sourceSessionId: 's1', path: undefined }], 'C:/codex']])
+  assert.equal(res1.$state.status, 200)
+
+  const res2 = jsonRes()
+  await route().handler(jsonReq(`${api}/import`, { targets: [{ sourceSessionId: 's2' }] }), res2)
+  assert.deepEqual(calls, [
+    ['codex', [{ sourceSessionId: 's1', path: undefined }], 'C:/codex'],
+    ['claude', [{ sourceSessionId: 's2', path: undefined }], undefined],
+  ])
+  assert.equal(res2.$state.status, 200)
+  dispose()
+})

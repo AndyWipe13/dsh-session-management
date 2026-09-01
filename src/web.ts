@@ -156,8 +156,11 @@ export function registerSessionApi(ctx: { webServer?: WebServerLike }, service: 
         }
 
         if (path === `${API_PREFIX}/scan`) {
-          const root = params.get('root') ?? params.get('claudePath') ?? undefined
-          const result = await service.scanClaude(root)
+          const source = params.get('source') ?? 'claude-code'
+          const root = params.get('root') ?? params.get('claudePath') ?? params.get('codexPath') ?? undefined
+          const result = source === 'codex'
+            ? await service.scanCodex(root)
+            : await service.scanClaude(root)
           sendJson(res, 200, result)
           return
         }
@@ -168,6 +171,7 @@ export function registerSessionApi(ctx: { webServer?: WebServerLike }, service: 
             return
           }
           const body = await readJsonBody(req)
+          const source = typeof body.source === 'string' && body.source.length > 0 ? body.source : 'claude-code'
           const rawTargets = Array.isArray(body.targets) ? body.targets : []
           const targets: ImportSelection[] = rawTargets
             .filter((value): value is Record<string, unknown> => typeof value === 'object' && value !== null)
@@ -177,7 +181,9 @@ export function registerSessionApi(ctx: { webServer?: WebServerLike }, service: 
             }))
             .filter((target) => target.sourceSessionId.length > 0)
           const root = typeof body.root === 'string' ? body.root : undefined
-          const result = await service.importClaude(targets, root)
+          const result = source === 'codex'
+            ? await service.importCodex(targets, root)
+            : await service.importClaude(targets, root)
           sendJson(res, 200, result)
           return
         }
