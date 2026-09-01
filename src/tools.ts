@@ -1,0 +1,152 @@
+/**
+ * Read-only Agent tools for dsh-session-management.
+ *
+ * These tools are deliberately thin: they parse/validate args, call the
+ * SessionManagement service, and render the canonical result for the model.
+ * No business logic lives here.
+ */
+
+import { defineTool } from '@deepseek-ai/dsh-tools'
+import type { SessionListFilter, SessionManagementService, SessionListItem } from './service.js'
+
+interface ToolContext {
+  tools: {
+    register(tool: unknown): () => void
+  }
+}
+
+const sourceEnum = ['dsh', 'claude-code', 'codex'] as const
+
+function formatList(items: readonly SessionListItem[], total: number): string {
+  if (items.length === 0) return `No sessions found (total ${total}).`
+  const lines = items.map((item) => {
+    const flags = [
+      item.running ? 'running' : '',
+      item.archived ? 'archived' : '',
+    ].filter(Boolean).join(',')
+    const sizeMb = (item.sizeBytes / 1024 / 1024).toFixed(1)
+    return `- ${item.title ?? item.id} [${item.source}] updated=${new Date(item.updatedAt).toISOString()} size=${sizeMb}MB messages=${item.messageCount}${flags ? ` (${flags})` : ''}`
+  })
+  return `Found ${total} session(s):\n${lines.join('\n')}`
+}
+
+function formatPreview(value: Awaited<ReturnType<SessionManagementService['preview']>>): string {
+  const lines = [
+    `Session: ${value.title ?? value.id}`,
+    `Source: ${value.source}`,
+    `Path: ${value.cwd ?? '(none)'}`,
+    `Created: ${new Date(value.createdAt).toISOString()}`,
+    `Updated: ${new Date(value.updatedAt).toISOString()}`,
+    `State: ${value.running ? 'running' : 'idle'}${value.archived ? ', archived' : ''}`,
+    `Events: ${value.events.length}`,
+  ]
+  for (const event of value.events.slice(0, 100)) {
+    const e = event as { type?: string; time?: number; data?: unknown }
+    lines.push(`- [${e.type ?? 'event'}] ${JSON.stringify(e.data ?? '')}`)
+  }
+  return lines.join('\n')
+}
+
+export function registerReadOnlyTools(ctx: ToolContext, service: SessionManagementService): () => void {
+  const disposers: Array<() => void> = []
+  const register = (tool: unknown): void => {
+    disposers.push(ctx.tools.register(tool))
+  }
+  const define = (options: any) => defineTool(options)
+
+  register(define({
+    name: 'list_sessions',
+    description: 'List DSH native and imported sessions with optional source, archive-state, workspace, and title query filters.',
+    parameters: {
+      source: {
+        type: 'string',
+        enum: [...sourceEnum],
+        description: 'Filter by session source: dsh, claude-code, or codex.',
+      },
+      archived: {
+        type: 'boolean',
+        description: 'When true list only archived sessions; when false list only active sessions. Omit for all.',
+      },
+      cwd: {
+        type: 'string',
+        description: 'Exact working directory filter.',
+      },
+      workspace: {
+        type: 'string',
+        description: 'Workspace/project name or path substring filter.',
+      },
+      query: {
+        type: 'string',
+        description: 'Optional title substring filter.',
+      },
+    },
+    output: {
+      schema: { type: 'json' },
+      render: (_args: unknown, value: { items: readonly SessionListItem[]; total: number }) => [
+        { type: 'text', text: formatList(value.items, value.total) },
+      ],
+    },
+    async execute(args: SessionListFilter) {
+      return service.list(args)
+    },
+  }))
+
+  register(define({
+    name: 'search_sessions',
+    description: 'Search DSH native and imported sessions by title substring, combined with optional filters.',
+    parameters: {
+      query: {
+        type: 'string',
+        description: 'Title substring to search for.',
+        required: true,
+      },
+      source: {
+        type: 'string',
+        enum: [...sourceEnum],
+        description: 'Filter by session source: dsh, claude-code, or codex.',
+      },
+      archived: {
+        type: 'boolean',
+        description: 'When true list only archived sessions; when false list only active sessions. Omit for all.',
+      },
+      workspace: {
+        type: 'string',
+        description: 'Workspace/project name or path substring filter.',
+      },
+    },
+    output: {
+      schema: { type: 'json' },
+      render: (_args: unknown, value: { items: readonly SessionListItem[]; total: number }) => [
+        { type: 'text', text: formatList(value.items, value.total) },
+      ],
+    },
+    async execute(args: { query: string } & Omit<SessionListFilter, 'query'>) {
+      return service.search(args.query, args)
+    },
+  }))
+
+  register(define({
+    name: 'preview_session',
+    description: 'Preview one DSH session history (title, metadata, and the official read-path event log).',
+    parameters: {
+      sessionId: {
+        type: 'string',
+        description: 'DSH session id to preview.',
+        required: true,
+      },
+    },
+    output: {
+      schema: { type: 'json' },
+      render: (_args: unknown, value: Awaited<ReturnType<SessionManagementService['preview']>>) => [
+        { type: 'text', text: formatPreview(value) },
+      ],
+    },
+    async execute(args: { sessionId: string }) {
+      return service.preview(args.sessionId)
+    },
+  }))
+
+  return () => {
+    for (const dispose of disposers.splice(0)) dispose()
+  }
+}

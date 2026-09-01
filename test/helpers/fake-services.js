@@ -7,16 +7,17 @@
  * calls without depending on DSH internals.
  */
 
-/** The five official service faces the harness must expose. */
+/** The official service faces the harness must expose. */
 export const OFFICIAL_SERVICES = [
   'sessions',
   'sessionQuery',
   'sessionPersistence',
   'workspaceRegistry',
   'storageDomain',
+  'webServer',
 ]
 
-/** Create a fake Cordis-like context with the five official service faces. */
+/** Create a fake Cordis-like context with the official service faces. */
 export function createFakeContext(overrides = {}) {
   const calls = {
     sessions: [],
@@ -25,10 +26,12 @@ export function createFakeContext(overrides = {}) {
     workspaceRegistry: [],
     storageDomain: [],
     tools: [],
+    webServer: [],
   }
 
   const disposers = []
   const registeredTools = []
+  const registeredRoutes = []
 
   const tools = {
     register(tool) {
@@ -41,6 +44,20 @@ export function createFakeContext(overrides = {}) {
     },
     list() {
       return registeredTools.slice()
+    },
+  }
+
+  const webServer = {
+    register(route) {
+      registeredRoutes.push(route)
+      calls.webServer.push({ op: 'register', path: route.path, kind: route.kind })
+      return () => {
+        const index = registeredRoutes.indexOf(route)
+        if (index >= 0) registeredRoutes.splice(index, 1)
+      }
+    },
+    list() {
+      return registeredRoutes.slice()
     },
   }
 
@@ -228,12 +245,14 @@ export function createFakeContext(overrides = {}) {
     sessionPersistence,
     workspaceRegistry,
     storageDomain,
+    webServer,
     ...overrides,
   }
 
   ctx.$calls = calls
   ctx.$disposers = disposers
   ctx.$registeredTools = registeredTools
+  ctx.$registeredRoutes = registeredRoutes
   ctx.$openDomains = openDomains
   return ctx
 }

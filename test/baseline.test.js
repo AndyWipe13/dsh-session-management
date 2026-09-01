@@ -11,7 +11,7 @@ const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 
 test('plugin baseline exports shape', () => {
   assert.equal(name, '@dsh-external/dsh-session-management')
-  assert.equal(inject.length, 0)
+  assert.deepEqual(inject, ['tools', 'sessions', 'sessionQuery', 'sessionPersistence', 'workspaceRegistry', 'storageDomain'])
   assert.equal(typeof apply, 'function')
   assert.ok(Config, 'Config schema should exist for future configuration')
 })
@@ -22,14 +22,21 @@ test('bundle patch points at the built plugin module', () => {
   assert.ok(fs.existsSync(path.join(repoRoot, 'lib', 'index.js')), 'lib/index.js must exist after build')
 })
 
-test('plugin applies cleanly without registering hello placeholder', () => {
+test('plugin applies cleanly and registers read-only tools and settings api', () => {
   const ctx = createFakeContext()
   assert.doesNotThrow(() => apply(ctx, {}))
-  assert.deepEqual(ctx.$registeredTools, [])
+  assert.deepEqual(
+    ctx.$registeredTools.map((tool) => tool.name),
+    ['list_sessions', 'search_sessions', 'preview_session'],
+  )
   assert.equal(
     ctx.$registeredTools.some((tool) => tool.name === '_dsh_external_dsh_session_management_hello'),
     false,
     'hello placeholder tool must be removed',
+  )
+  assert.ok(
+    ctx.$registeredRoutes.some((route) => route.kind === 'prefix' && route.path.includes('/@dsh-external/dsh-session-management/api')),
+    'settings api route should be registered',
   )
 })
 

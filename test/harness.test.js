@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 
 import { createFakeContext, OFFICIAL_SERVICES } from './helpers/fake-services.js'
 
-test('fake context exposes the five official service faces', () => {
+test('fake context exposes the official service faces', () => {
   const ctx = createFakeContext()
 
   for (const service of OFFICIAL_SERVICES) {

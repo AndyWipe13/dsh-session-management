@@ -1,21 +1,42 @@
 /**
  * @dsh-external/dsh-session-management — 会话管理插件。
  *
- * 当前为工程基线切片（issue #2）：
- * - 已移除脚手架 hello 占位工具；
- * - 插件保持可构建、可装配、可卸载的干净入口；
- * - 后续切片将在此注册 SessionManagement 服务、设置页与 Agent 工具。
+ * Issue #3 落地读路径全栈：
+ * - SessionManagement 服务面（list/search/preview）作为单一测试接缝；
+ * - import manifest 存储单元（初始为空）用于来源反查；
+ * - 只读 Agent 工具 list_sessions / search_sessions / preview_session；
+ * - Host HTTP API 供设置页薄 UI 消费（client 半区见 client.js）。
  */
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import { openManifestStore } from './manifest.js'
+import { createSessionManagementService } from './service.js'
+import { registerReadOnlyTools } from './tools.js'
+import { registerSessionApi } from './web.js'
 
 export const name = '@dsh-external/dsh-session-management'
-export const inject: string[] = []
+export const inject = ['tools', 'sessions', 'sessionQuery', 'sessionPersistence', 'workspaceRegistry', 'storageDomain']
 
 export interface Config {}
 
 export const Config = z.object({})
 
-export function apply(_ctx: Context, _config: Config): void {
-  // 基线切片暂无业务注册；后续功能全部挂 ctx.effect，热重载/卸载自动清理。
+export function apply(ctx: Context, _config: Config): void {
+  const services = ctx as unknown as {
+    storageDomain: { open(spec: unknown): Promise<unknown> }
+    tools: { register(tool: unknown): () => void }
+    webServer?: {
+      register(route: unknown): () => void
+    }
+  }
+
+  const manifest = openManifestStore(services.storageDomain)
+  const service = createSessionManagementService(ctx as never, manifest)
+
+  ctx.effect(() => () => {
+    void manifest.close()
+  }, '@dsh-external/dsh-session-management: import manifest')
+
+  ctx.effect(() => registerReadOnlyTools(services, service), '@dsh-external/dsh-session-management: read-only tools')
+  ctx.effect(() => registerSessionApi(services, service), '@dsh-external/dsh-session-management: settings api')
 }
