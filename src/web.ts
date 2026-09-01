@@ -131,6 +131,30 @@ export function registerSessionApi(ctx: { webServer?: WebServerLike }, service: 
           return
         }
 
+        if (path === `${API_PREFIX}/delete`) {
+          if (req.method !== 'POST') {
+            sendError(res, 405, 'Method not allowed')
+            return
+          }
+          const body = await readJsonBody(req)
+          const rawIds = Array.isArray(body.sessionIds)
+            ? body.sessionIds
+            : typeof body.sessionId === 'string'
+              ? [body.sessionId]
+              : []
+          const sessionIds = rawIds.filter((value): value is string => typeof value === 'string' && value.length > 0)
+          if (sessionIds.length === 0) {
+            sendError(res, 400, 'Missing sessionIds')
+            return
+          }
+          const confirmToken = typeof body.confirmToken === 'string'
+            ? body.confirmToken
+            : typeof body.token === 'string' ? body.token : undefined
+          const result = await service.deleteSessions(sessionIds, { confirmToken })
+          sendJson(res, 200, result)
+          return
+        }
+
         if (path === `${API_PREFIX}/scan`) {
           const root = params.get('root') ?? params.get('claudePath') ?? undefined
           const result = await service.scanClaude(root)

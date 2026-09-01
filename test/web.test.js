@@ -86,6 +86,46 @@ test('archive route rejects a missing sessionId', async () => {
   dispose()
 })
 
+test('delete HTTP route calls the service with sessionIds and confirmToken', async () => {
+  const calls = []
+  const service = {
+    deleteSessions: async (sessionIds, options) => {
+      calls.push(['delete', sessionIds, options])
+      return { deletedSessionIds: sessionIds, paths: ['C:/fake/sessions/s1/session.jsonl'] }
+    },
+  }
+  const { ctx, route } = captureRoute()
+  const dispose = registerSessionApi(ctx, service)
+  const api = '/@dsh-external/dsh-session-management/api'
+
+  const res = jsonRes()
+  await route().handler(jsonReq(`${api}/delete`, { sessionIds: ['s1', 's2'], confirmToken: 'DELETE' }), res)
+  assert.deepEqual(calls, [['delete', ['s1', 's2'], { confirmToken: 'DELETE' }]])
+  assert.equal(res.$state.status, 200)
+  assert.deepEqual(JSON.parse(res.$state.body), {
+    deletedSessionIds: ['s1', 's2'],
+    paths: ['C:/fake/sessions/s1/session.jsonl'],
+  })
+  dispose()
+})
+
+test('delete route rejects a missing sessionIds', async () => {
+  const calls = []
+  const service = {
+    deleteSessions: async (sessionIds) => calls.push(['delete', sessionIds]),
+  }
+  const { ctx, route } = captureRoute()
+  const dispose = registerSessionApi(ctx, service)
+  const api = '/@dsh-external/dsh-session-management/api'
+
+  const res = jsonRes()
+  await route().handler(jsonReq(`${api}/delete`, { confirmToken: 'DELETE' }), res)
+  assert.equal(res.$state.status, 400)
+  assert.deepEqual(JSON.parse(res.$state.body), { error: 'Missing sessionIds' })
+  assert.deepEqual(calls, [])
+  dispose()
+})
+
 test('open HTTP route calls the service with sessionId', async () => {
   const calls = []
   const service = {

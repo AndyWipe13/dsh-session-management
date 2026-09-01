@@ -7,6 +7,8 @@
  * - Agent 工具 list_sessions / search_sessions / preview_session / archive_session / unarchive_session；
  * - Host HTTP API 供设置页薄 UI 消费（client 半区见 client.js）。
  */
+import { rm } from 'node:fs/promises'
+import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { openManifestStore } from './manifest.js'
@@ -34,12 +36,18 @@ export function apply(ctx: Context, config: Config): void {
     webServer?: {
       register(route: unknown): () => void
     }
+    on?(event: string, listener: (exec: unknown, next: () => unknown) => unknown): unknown
   }
 
   const manifest = openManifestStore(services.storageDomain)
   const service = createSessionManagementService(ctx as never, manifest, {
     claudePath: resolveClaudeProjectsRoot(config.claudePath),
     claude: createClaudeSourceReader(),
+    deleter: async (location) => {
+      // The persistence locate() points at the session log file; the whole
+      // session directory is the DSH-side artifact we remove.
+      await rm(path.dirname(location.path), { recursive: true, force: true })
+    },
   })
 
   ctx.effect(() => () => {

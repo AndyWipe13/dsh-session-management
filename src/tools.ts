@@ -7,12 +7,13 @@
  */
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { ImportReport, SessionListFilter, SessionManagementService, SessionListItem } from './service.js'
+import type { ImportReport, SessionDeleteResult, SessionListFilter, SessionManagementService, SessionListItem } from './service.js'
 
 interface ToolContext {
   tools: {
     register(tool: unknown): () => void
   }
+  on?(event: string, listener: (exec: unknown, next: () => unknown) => unknown): unknown
 }
 
 const sourceEnum = ['dsh', 'claude-code', 'codex'] as const
@@ -62,6 +63,15 @@ function formatImportReport(report: ImportReport): string {
     lines.push(`- ${details.join(' | ')}`)
   }
   return lines.join('\n')
+}
+
+function formatDeleteResult(result: SessionDeleteResult): string {
+  if (result.deletedSessionIds.length === 0) return 'No sessions deleted.'
+  const lines = result.deletedSessionIds.map((id, index) => {
+    const path = result.paths[index]
+    return `- ${id}${path ? ` at ${path}` : ''}`
+  })
+  return `Deleted ${result.deletedSessionIds.length} session(s):\n${lines.join('\n')}`
 }
 
 export function registerSessionTools(ctx: ToolContext, service: SessionManagementService): () => void {
@@ -232,6 +242,46 @@ export function registerSessionTools(ctx: ToolContext, service: SessionManagemen
       return service.importClaude(args.sourceSessionIds.map((sourceSessionId) => ({ sourceSessionId })), args.root)
     },
   }))
+
+  register(define({
+    name: 'delete_sessions',
+    description: 'Permanently delete DSH sessions. Requires the exact token DELETE and official user approval; deleted session logs are removed and cannot be recovered.',
+    parameters: {
+      sessionIds: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'DSH session ids to permanently delete.',
+        required: true,
+      },
+      confirmToken: {
+        type: 'string',
+        description: 'Must equal DELETE to confirm permanent deletion.',
+        required: true,
+      },
+    },
+    output: {
+      schema: { type: 'json' },
+      render: (_args: unknown, value: SessionDeleteResult) => [
+        { type: 'text', text: formatDeleteResult(value) },
+      ],
+    },
+    async execute(args: { sessionIds: readonly string[]; confirmToken: string }) {
+      return service.deleteSessions(args.sessionIds, { confirmToken: args.confirmToken })
+    },
+  }))
+
+  if (typeof ctx.on === 'function') {
+    const disposeApproval = ctx.on('tools/pre-execute', async (exec: unknown, next: () => unknown) => {
+      const execution = exec as { name?: string; arguments?: { sessionIds?: readonly string[] } } | undefined
+      if (execution?.name === 'delete_sessions') {
+        const targets = execution.arguments?.sessionIds
+        const targetText = targets && targets.length > 0 ? targets.join(', ') : 'unknown session(s)'
+        return { kind: 'ask', reason: `Permanently delete DSH session(s): ${targetText}. This action cannot be undone.` }
+      }
+      return next()
+    })
+    if (typeof disposeApproval === 'function') disposers.push(disposeApproval as () => void)
+  }
 
   return () => {
     for (const dispose of disposers.splice(0)) dispose()

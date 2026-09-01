@@ -19,6 +19,8 @@ export interface SessionManagementOptions {
   claudePath?: string
   /** Filesystem-facing Claude reader. Defaults are supplied by the plugin entry. */
   claude?: ClaudeSourceReader
+  /** Filesystem-facing artifact deleter. Defaults are supplied by the plugin entry. */
+  deleter?: SessionArtifactDeleter
 }
 
 export interface SessionListFilter {
@@ -111,6 +113,29 @@ export interface SessionOpenResult {
   reason?: string
 }
 
+export interface SessionDeleteOptions {
+  /** Batch deletes (and all tool-driven deletes) require the exact token `DELETE`. */
+  confirmToken?: string
+}
+
+export interface SessionDeleteResult {
+  deletedSessionIds: readonly string[]
+  paths: readonly string[]
+}
+
+export interface SessionArtifactLocation {
+  sessionId: string
+  path: string
+}
+
+export type SessionArtifactDeleter = (location: SessionArtifactLocation) => Promise<void> | void
+
+/** One workspace entity as seen by the deletion cleanup path. */
+export interface SessionWorkspaceLike {
+  sessionIds?: readonly string[]
+  detachSession?(sessionId: string): Promise<void> | void
+}
+
 /** Minimal structural face of the official services the read path needs. */
 export interface SessionServiceContext {
   sessionQuery: {
@@ -123,6 +148,7 @@ export interface SessionServiceContext {
   }
   sessionPersistence?: {
     readRaw?(id: string): Promise<{ content?: string } | undefined>
+    locate?(meta: { id: string; cwd?: string; createdAt?: number }): { path?: string } | undefined
   }
   workspaceRegistry?: {
     archivedSessionIds?: readonly string[] | Set<string>
@@ -130,6 +156,7 @@ export interface SessionServiceContext {
     enqueueOperation?(operation: () => Promise<void> | void): Promise<unknown>
     requireState?(): { workspaceIds?: readonly unknown[]; archivedSessionIds?: readonly string[] } | undefined
     setState?(state: unknown): Promise<unknown> | unknown
+    list?(): readonly SessionWorkspaceLike[]
   }
   sessions?: {
     get?(id: string): unknown
@@ -204,6 +231,7 @@ function archivedSetOf(workspaceRegistry: SessionServiceContext['workspaceRegist
 
 const DSH_RC_VERSION = '0.1.0-rc.7'
 const UNARCHIVE_CHANNEL_VERSION = 1
+export const DELETE_CONFIRM_TOKEN = 'DELETE'
 
 /** The rc.7 workspaceRegistry internal channel face required by ADR-0001. */
 interface UnarchiveWorkspaceRegistry {
@@ -220,6 +248,37 @@ function requireUnarchiveChannel(registry: SessionServiceContext['workspaceRegis
     )
   }
   return registry as unknown as UnarchiveWorkspaceRegistry
+}
+
+/** Shared internal-channel state validation for unarchive/delete cleanup. */
+function requireRegistryState(registry: SessionServiceContext['workspaceRegistry']): { initialized: boolean; workspaceIds: readonly string[]; archivedSessionIds: readonly string[] } {
+  const channel = requireUnarchiveChannel(registry)
+  const state = channel.requireState()
+  if (
+    !state ||
+    typeof state.initialized !== 'boolean' ||
+    !Array.isArray(state.archivedSessionIds) ||
+    state.archivedSessionIds.some((id) => typeof id !== 'string') ||
+    !Array.isArray(state.workspaceIds) ||
+    state.workspaceIds.some((id) => typeof id !== 'string')
+  ) {
+    throw new Error(
+      `workspaceRegistry unarchive internal channel state is invalid: expected initialized boolean, workspaceIds string[], archivedSessionIds string[] ` +
+      `(DSH ${DSH_RC_VERSION}, channel v${UNARCHIVE_CHANNEL_VERSION})`,
+    )
+  }
+  return {
+    initialized: state.initialized,
+    workspaceIds: state.workspaceIds as readonly string[],
+    archivedSessionIds: state.archivedSessionIds as readonly string[],
+  }
+}
+
+const THIRD_PARTY_SOURCE_SEGMENTS = new Set(['.claude', '.codex'])
+
+function isProtectedThirdPartyPath(filePath: string): boolean {
+  const segments = filePath.replace(/\\/g, '/').toLowerCase().split('/').filter(Boolean)
+  return segments.some((segment) => THIRD_PARTY_SOURCE_SEGMENTS.has(segment))
 }
 
 export class SessionManagementService {
@@ -334,26 +393,73 @@ export class SessionManagementService {
   async unarchive(sessionId: string): Promise<void> {
     const registry = requireUnarchiveChannel(this.ctx.workspaceRegistry)
     await registry.enqueueOperation(async () => {
-      const state = registry.requireState()
-      if (
-        !state ||
-        typeof state.initialized !== 'boolean' ||
-        !Array.isArray(state.archivedSessionIds) ||
-        state.archivedSessionIds.some((id) => typeof id !== 'string') ||
-        !Array.isArray(state.workspaceIds) ||
-        state.workspaceIds.some((id) => typeof id !== 'string')
-      ) {
-        throw new Error(
-          `workspaceRegistry unarchive internal channel state is invalid: expected initialized boolean, workspaceIds string[], archivedSessionIds string[] ` +
-          `(DSH ${DSH_RC_VERSION}, channel v${UNARCHIVE_CHANNEL_VERSION})`,
-        )
-      }
+      const state = requireRegistryState(this.ctx.workspaceRegistry)
       if (!state.archivedSessionIds.includes(sessionId)) return
       await registry.setState({
         ...state,
         archivedSessionIds: state.archivedSessionIds.filter((id) => id !== sessionId),
       })
     })
+  }
+
+  /**
+   * Permanently delete one or more DSH-side sessions.
+   *
+   * Safety gates run before any side effect:
+   * - batch (and tool) calls require the exact token `DELETE`;
+   * - running sessions (`ctx.sessions` hit) are rejected;
+   * - the private workspaceRegistry channel shape is validated;
+   * - located artifacts are asserted never to live under a third-party source tree.
+   *
+   * After the artifact is removed the archived set and workspace accounts are
+   * cleaned, and any import manifest mapping is removed.
+   */
+  async deleteSessions(sessionIds: readonly string[], options: SessionDeleteOptions = {}): Promise<SessionDeleteResult> {
+    const ids = [...new Set(sessionIds.filter((id): id is string => typeof id === 'string' && id.length > 0))]
+    if (ids.length === 0) {
+      throw new Error('No session ids provided for deletion')
+    }
+    if (options.confirmToken !== DELETE_CONFIRM_TOKEN) {
+      throw new Error('Delete requires the exact token DELETE')
+    }
+
+    // Validate every gate before any irreversible side effect.
+    const registry = requireUnarchiveChannel(this.ctx.workspaceRegistry)
+    requireRegistryState(this.ctx.workspaceRegistry)
+
+    const running = []
+    for (const id of ids) {
+      if (await this.isRunning(id)) running.push(id)
+    }
+    if (running.length > 0) {
+      throw new Error(`Cannot delete running session(s): ${running.join(', ')}`)
+    }
+
+    const locations: SessionArtifactLocation[] = []
+    for (const id of ids) {
+      locations.push(await this.locateDeletionTarget(id))
+    }
+
+    if (!this.options.deleter) {
+      throw new Error('Session artifact deleter is not configured')
+    }
+
+    // Double-check all cleanup faces before deleting anything.
+    await this.manifest.assertDeleteAvailable()
+    this.assertWorkspaceCleanupAvailable(ids)
+
+    for (const location of locations) {
+      await this.options.deleter(location)
+    }
+
+    await this.removeArchived(ids, registry)
+    await this.detachWorkspaces(ids)
+    await this.removeManifest(ids)
+
+    return {
+      deletedSessionIds: ids,
+      paths: locations.map((location) => location.path),
+    }
   }
 
   /**
@@ -632,6 +738,81 @@ export class SessionManagementService {
     if (events.length === 0) return fallback
     const last = events[events.length - 1]?.time
     return last ?? fallback
+  }
+
+  private async locateDeletionTarget(id: string): Promise<SessionArtifactLocation> {
+    const locate = this.ctx.sessionPersistence?.locate
+    if (typeof locate !== 'function') {
+      throw new Error(`sessionPersistence.locate is unavailable; cannot delete session ${id}`)
+    }
+    const snapshot = await this.ctx.sessionQuery.readSession(id)
+    const normalized = normalizeReadSession(snapshot)
+    const location = locate({
+      id,
+      ...(normalized.cwd ? { cwd: normalized.cwd } : {}),
+      ...(normalized.createdAt ? { createdAt: normalized.createdAt } : {}),
+    })
+    if (!location || typeof location.path !== 'string' || location.path.length === 0) {
+      throw new Error(`Cannot resolve deletion path for session ${id}`)
+    }
+    if (isProtectedThirdPartyPath(location.path)) {
+      throw new Error(`Refusing to delete third-party source file: ${location.path}`)
+    }
+    return { sessionId: id, path: location.path }
+  }
+
+  private assertWorkspaceCleanupAvailable(ids: readonly string[]): void {
+    const registry = this.ctx.workspaceRegistry
+    const state = requireRegistryState(this.ctx.workspaceRegistry)
+    const workspaces = typeof registry?.list === 'function' ? registry.list() : []
+    const hasMatchingWorkspace = workspaces.some((workspace) =>
+      workspace.sessionIds?.some((id) => ids.includes(id)),
+    )
+    if (hasMatchingWorkspace && workspaces.some((workspace) =>
+      workspace.sessionIds?.some((id) => ids.includes(id)) && typeof workspace.detachSession !== 'function',
+    )) {
+      throw new Error('workspace entity detachSession is unavailable; cannot clean workspace registration')
+    }
+    if (!hasMatchingWorkspace && state.workspaceIds.length > 0 && typeof registry?.list !== 'function') {
+      throw new Error('workspaceRegistry.list is unavailable; cannot clean workspace registration')
+    }
+  }
+
+  private async removeArchived(
+    ids: readonly string[],
+    registry: UnarchiveWorkspaceRegistry,
+  ): Promise<void> {
+    await registry.enqueueOperation(async () => {
+      const state = requireRegistryState(this.ctx.workspaceRegistry)
+      const next = state.archivedSessionIds.filter((id) => !ids.includes(id))
+      if (next.length === state.archivedSessionIds.length) return
+      await registry.setState({
+        ...state,
+        archivedSessionIds: next,
+      })
+    })
+  }
+
+  private async detachWorkspaces(ids: readonly string[]): Promise<void> {
+    const registry = this.ctx.workspaceRegistry
+    if (typeof registry?.list !== 'function') return
+    for (const workspace of registry.list()) {
+      if (!workspace.sessionIds?.some((id) => ids.includes(id))) continue
+      if (typeof workspace.detachSession !== 'function') {
+        throw new Error('workspace entity detachSession is unavailable; cannot clean workspace registration')
+      }
+      for (const id of ids) {
+        if (workspace.sessionIds.includes(id)) {
+          await workspace.detachSession(id)
+        }
+      }
+    }
+  }
+
+  private async removeManifest(ids: readonly string[]): Promise<void> {
+    for (const id of ids) {
+      await this.manifest.removeByDsh(id)
+    }
   }
 
   private async isRunning(id: string): Promise<boolean> {

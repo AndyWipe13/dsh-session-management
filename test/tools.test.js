@@ -17,7 +17,7 @@ test('session tools are registered and call the service', async () => {
 
   assert.deepEqual(
     ctx.$registeredTools.map((tool) => tool.name),
-    ['list_sessions', 'search_sessions', 'preview_session', 'archive_session', 'unarchive_session', 'import_sessions'],
+    ['list_sessions', 'search_sessions', 'preview_session', 'archive_session', 'unarchive_session', 'import_sessions', 'delete_sessions'],
   )
 
   const listTool = ctx.$registeredTools.find((tool) => tool.name === 'list_sessions')
@@ -46,4 +46,15 @@ test('session tools are registered and call the service', async () => {
   const unarchiveTool = ctx.$registeredTools.find((tool) => tool.name === 'unarchive_session')
   const unarchiveResult = await unarchiveTool.execute({ sessionId: 's1' })
   assert.deepEqual(unarchiveResult, { sessionId: 's1', archived: false })
+
+  const deleteTool = ctx.$registeredTools.find((tool) => tool.name === 'delete_sessions')
+  assert.ok(deleteTool, 'delete_sessions should be registered')
+  const approvalListeners = ctx.$registeredEvents.get('tools/pre-execute') || []
+  assert.ok(approvalListeners.length > 0, 'delete_sessions should install a tools/pre-execute approval hook')
+  const decision = await approvalListeners[0](
+    { name: 'delete_sessions', arguments: { sessionIds: ['s1'] } },
+    async () => ({ kind: 'allow' }),
+  )
+  assert.equal(decision.kind, 'ask')
+  assert.match(decision.reason, /s1/)
 })

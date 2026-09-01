@@ -35,6 +35,10 @@ export interface ManifestStore {
   getBySource(source: SessionSource, sourceSessionId: string): Promise<ImportRecord | undefined>
   /** Persist the bidirectional (source, sourceSessionId) <-> dshSessionId index. */
   put(record: ImportRecord): Promise<void>
+  /** Remove both index directions for a deleted imported session. */
+  removeByDsh(dshSessionId: string): Promise<void>
+  /** Fail before any deletion if the manifest cannot clean imported mappings. */
+  assertDeleteAvailable(): Promise<void>
   close(): Promise<void>
 }
 
@@ -47,6 +51,7 @@ interface ManifestTableLike {
   get(key: string): unknown
   put?(key: string, value: unknown): unknown
   set?(key: string, value: unknown): unknown
+  delete?(key: string): unknown
 }
 
 /**
@@ -71,6 +76,7 @@ export function openManifestStore(storageDomain: StorageDomainLike): ManifestSto
       get?: (key: string) => unknown
       put?: (key: string, value: unknown) => unknown
       set?: (key: string, value: unknown) => unknown
+      delete?: (key: string) => unknown
     }
     if (typeof maybeDomain.table === 'function') {
       return maybeDomain.table(IMPORTS_TABLE)
@@ -83,6 +89,9 @@ export function openManifestStore(storageDomain: StorageDomainLike): ManifestSto
     }
     if (typeof maybeDomain.set === 'function') {
       table.set = (key: string, value: unknown) => maybeDomain.set!(key, value)
+    }
+    if (typeof maybeDomain.delete === 'function') {
+      table.delete = (key: string) => maybeDomain.delete!(key)
     }
     return table
   }
@@ -108,6 +117,22 @@ export function openManifestStore(storageDomain: StorageDomainLike): ManifestSto
     throw new Error('manifest storage unit does not expose a write handle')
   }
 
+  async function remove(key: string): Promise<void> {
+    const table = await resolveTable()
+    if (typeof table.delete !== 'function') {
+      throw new Error('manifest storage unit does not expose a delete handle')
+    }
+    const result = table.delete(key)
+    if (result instanceof Promise) await result
+  }
+
+  async function assertDeleteAvailable(): Promise<void> {
+    const table = await resolveTable()
+    if (typeof table.delete !== 'function') {
+      throw new Error('manifest storage unit does not expose a delete handle')
+    }
+  }
+
   return {
     async getByDsh(dshSessionId: string): Promise<ImportRecord | undefined> {
       return (await read(`dsh:${dshSessionId}`)) as ImportRecord | undefined
@@ -118,6 +143,15 @@ export function openManifestStore(storageDomain: StorageDomainLike): ManifestSto
     async put(record: ImportRecord): Promise<void> {
       await write(`source:${record.source}:${record.sourceSessionId}`, record)
       await write(`dsh:${record.dshSessionId}`, record)
+    },
+    async removeByDsh(dshSessionId: string): Promise<void> {
+      const record = (await read(`dsh:${dshSessionId}`)) as ImportRecord | undefined
+      if (!record) return
+      await remove(`dsh:${dshSessionId}`)
+      await remove(`source:${record.source}:${record.sourceSessionId}`)
+    },
+    async assertDeleteAvailable(): Promise<void> {
+      await assertDeleteAvailable()
     },
     async close(): Promise<void> {
       const domain = (await opening) as { close?: () => Promise<void> }

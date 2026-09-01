@@ -34,6 +34,7 @@ export function createFakeContext(overrides = {}) {
   const disposers = []
   const registeredTools = []
   const registeredRoutes = []
+  const registeredEvents = new Map()
 
   const tools = {
     register(tool) {
@@ -271,7 +272,16 @@ export function createFakeContext(overrides = {}) {
       if (typeof disposer === 'function') disposers.push(disposer)
       return disposer
     },
-    on() {},
+    on(event, listener) {
+      if (!registeredEvents.has(event)) registeredEvents.set(event, [])
+      registeredEvents.get(event).push(listener)
+      return () => {
+        const listeners = registeredEvents.get(event)
+        if (!listeners) return
+        const index = listeners.indexOf(listener)
+        if (index >= 0) listeners.splice(index, 1)
+      }
+    },
     emit() {},
     bail: async () => undefined,
     serial: async () => undefined,
@@ -291,6 +301,7 @@ export function createFakeContext(overrides = {}) {
   ctx.$disposers = disposers
   ctx.$registeredTools = registeredTools
   ctx.$registeredRoutes = registeredRoutes
+  ctx.$registeredEvents = registeredEvents
   ctx.$openDomains = openDomains
   return ctx
 }

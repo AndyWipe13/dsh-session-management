@@ -72,6 +72,8 @@ window.__ModuleLoader__.load({
       const [notice, setNotice] = useState(null)
       const [busyId, setBusyId] = useState(null)
       const [loading, setLoading] = useState(false)
+      const [selected, setSelected] = useState({})
+      const [deleteToken, setDeleteToken] = useState('')
 
       const load = useCallback(() => {
         const params = new URLSearchParams()
@@ -130,8 +132,75 @@ window.__ModuleLoader__.load({
           .finally(() => setBusyId(null))
       }, [load])
 
+      const selectableItems = items.filter((item) => !item.running)
+
+      const toggleSelect = useCallback((id) => {
+        setSelected((prev) => ({ ...prev, [id]: !prev[id] }))
+      }, [])
+
+      const toggleSelectAll = useCallback(() => {
+        const allSelected = selectableItems.length > 0 && selectableItems.every((item) => selected[item.id])
+        const next = {}
+        if (!allSelected) {
+          for (const item of selectableItems) next[item.id] = true
+        }
+        setSelected(next)
+      }, [selectableItems, selected])
+
+      const runDelete = useCallback((item) => {
+        if (item.running) {
+          setError('运行中会话不可删除。')
+          return
+        }
+        setBusyId(item.id)
+        setError(null)
+        setNotice(null)
+        const confirmed = window.confirm(`删除会话“${item.title || item.id}”（${formatBytes(item.sizeBytes)}）？此操作不可恢复。`)
+        if (!confirmed) {
+          setBusyId(null)
+          return
+        }
+        postJson(`${API}/delete`, { sessionIds: [item.id], confirmToken: 'DELETE' })
+          .then((result) => {
+            setNotice(`已删除 ${result.deletedSessionIds.length} 个会话。`)
+            setSelected((prev) => {
+              const next = { ...prev }
+              delete next[item.id]
+              return next
+            })
+            load()
+          })
+          .catch((err) => setError(String(err.message || err)))
+          .finally(() => setBusyId(null))
+      }, [load])
+
+      const runBatchDelete = useCallback(() => {
+        const targetIds = items
+          .filter((item) => selected[item.id] && !item.running)
+          .map((item) => item.id)
+        if (targetIds.length === 0) return
+        if (deleteToken !== 'DELETE') {
+          setError('批量删除必须键入 DELETE 才能执行。')
+          return
+        }
+        setBusyId('__batch__')
+        setError(null)
+        setNotice(null)
+        postJson(`${API}/delete`, { sessionIds: targetIds, confirmToken: deleteToken })
+          .then((result) => {
+            setNotice(`已删除 ${result.deletedSessionIds.length} 个会话。`)
+            setSelected({})
+            setDeleteToken('')
+            load()
+          })
+          .catch((err) => setError(String(err.message || err)))
+          .finally(() => setBusyId(null))
+      }, [items, selected, deleteToken, load])
+
       const sourceOptions = ['all', 'dsh', 'claude-code', 'codex']
       const archivedOptions = [['all', '全部'], ['false', '活跃'], ['true', '已归档']]
+      const selectedCount = selectableItems.filter((item) => selected[item.id]).length
+      const allSelected = selectableItems.length > 0 && selectableItems.every((item) => selected[item.id])
 
       return React.createElement('div', { style: { padding: '12px', fontFamily: 'sans-serif' } },
         React.createElement('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '8px' } },
@@ -160,6 +229,22 @@ window.__ModuleLoader__.load({
             style: { padding: '4px' },
           }),
           React.createElement('button', { onClick: load }, '刷新'),
+          React.createElement('button', {
+            onClick: toggleSelectAll,
+            disabled: selectableItems.length === 0,
+          }, allSelected ? '取消全选' : '全选'),
+          React.createElement('input', {
+            placeholder: '批量删除需键入 DELETE',
+            value: deleteToken,
+            onChange: (event) => setDeleteToken(event.target.value),
+            style: { padding: '4px', width: '180px' },
+            'aria-label': '批量删除确认令牌',
+          }),
+          React.createElement('button', {
+            onClick: runBatchDelete,
+            disabled: selectedCount === 0 || busyId === '__batch__',
+            style: { fontWeight: 'bold' },
+          }, busyId === '__batch__' ? '删除中…' : `删除所选（${selectedCount}）`),
         ),
         error ? React.createElement('div', { style: { color: 'red', marginBottom: '8px' } }, String(error)) : null,
         notice ? React.createElement('div', { style: { color: '#1a7f37', marginBottom: '8px' } }, notice) : null,
@@ -167,17 +252,28 @@ window.__ModuleLoader__.load({
         React.createElement('table', { style: { borderCollapse: 'collapse', width: '100%' } },
           React.createElement('thead', null,
             React.createElement('tr', null,
-              ['标题', '来源', '最后活跃', '大小', '消息数', '状态', '操作'].map((label) =>
+              ['', '标题', '来源', '最后活跃', '大小', '消息数', '状态', '操作'].map((label, index) =>
                 React.createElement('th', { key: label, style: { border: '1px solid #ccc', padding: '4px', textAlign: 'left' } }, label)))),
           React.createElement('tbody', null,
             items.length === 0
-              ? React.createElement('tr', null, React.createElement('td', { colSpan: 7, style: { padding: '8px' } }, '没有会话'))
+              ? React.createElement('tr', null, React.createElement('td', { colSpan: 8, style: { padding: '8px' } }, '没有会话'))
               : items.map((item) =>
                 React.createElement('tr', {
                   key: item.id,
                   onClick: () => openPreview(item.id),
                   style: { cursor: 'pointer', border: '1px solid #ccc' },
                 },
+                  React.createElement('td', { style: { padding: '4px' } },
+                    React.createElement('input', {
+                      type: 'checkbox',
+                      checked: Boolean(selected[item.id]),
+                      disabled: item.running,
+                      onChange: (event) => {
+                        event.stopPropagation()
+                        toggleSelect(item.id)
+                      },
+                      'aria-label': `选择 ${item.title || item.id}`,
+                    })),
                   React.createElement('td', { style: { padding: '4px' } }, item.title || item.id),
                   React.createElement('td', { style: { padding: '4px' } }, sourceLabel(item.source)),
                   React.createElement('td', { style: { padding: '4px' } }, formatDate(item.updatedAt)),
@@ -201,7 +297,7 @@ window.__ModuleLoader__.load({
                             runArchiveAction(item.id, 'unarchive')
                           },
                           disabled: busyId === item.id,
-                          style: { padding: '2px 8px' },
+                          style: { padding: '2px 8px', marginRight: '4px' },
                         }, busyId === item.id ? '处理中…' : '取消归档')
                       : React.createElement('button', {
                           onClick: (event) => {
@@ -209,8 +305,18 @@ window.__ModuleLoader__.load({
                             runArchiveAction(item.id, 'archive')
                           },
                           disabled: busyId === item.id,
-                          style: { padding: '2px 8px' },
-                        }, busyId === item.id ? '处理中…' : '归档')),
+                          style: { padding: '2px 8px', marginRight: '4px' },
+                        }, busyId === item.id ? '处理中…' : '归档'),
+                    item.running
+                      ? React.createElement('span', { style: { color: '#b00', fontSize: '12px' } }, '运行中拒删')
+                      : React.createElement('button', {
+                          onClick: (event) => {
+                            event.stopPropagation()
+                            runDelete(item)
+                          },
+                          disabled: busyId === item.id,
+                          style: { padding: '2px 8px', borderColor: '#b00', color: '#b00' },
+                        }, busyId === item.id ? '处理中…' : '删除')),
                 )))),
         React.createElement('div', { style: { marginTop: '4px', color: '#777', fontSize: '12px' } }, '取消归档经内部通道：本列表即时更新，内置侧栏在刷新后收敛。'),
         preview ? React.createElement('div', { style: { marginTop: '12px', borderTop: '1px solid #ccc', paddingTop: '8px' } },
