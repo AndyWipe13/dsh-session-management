@@ -11,7 +11,7 @@ const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 
 test('plugin baseline exports shape', () => {
   assert.equal(name, '@dsh-external/dsh-session-management')
-  assert.deepEqual(inject, ['tools', 'sessions', 'sessionQuery', 'sessionPersistence', 'workspaceRegistry', 'storageDomain'])
+  assert.deepEqual(inject, ['tools', 'sessions', 'agents', 'sessionQuery', 'sessionPersistence', 'workspaceRegistry', 'storageDomain'])
   assert.equal(typeof apply, 'function')
   assert.ok(Config, 'Config schema should exist for future configuration')
 })
@@ -27,7 +27,7 @@ test('plugin applies cleanly and registers session tools and settings api', () =
   assert.doesNotThrow(() => apply(ctx, {}))
   assert.deepEqual(
     ctx.$registeredTools.map((tool) => tool.name),
-    ['list_sessions', 'search_sessions', 'preview_session', 'archive_session', 'unarchive_session'],
+    ['list_sessions', 'search_sessions', 'preview_session', 'archive_session', 'unarchive_session', 'import_sessions'],
   )
   assert.equal(
     ctx.$registeredTools.some((tool) => tool.name === '_dsh_external_dsh_session_management_hello'),

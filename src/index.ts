@@ -10,18 +10,24 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { openManifestStore } from './manifest.js'
+import { createClaudeSourceReader, resolveClaudeProjectsRoot } from './claude.js'
 import { createSessionManagementService } from './service.js'
 import { registerSessionTools } from './tools.js'
 import { registerSessionApi } from './web.js'
 
 export const name = '@dsh-external/dsh-session-management'
-export const inject = ['tools', 'sessions', 'sessionQuery', 'sessionPersistence', 'workspaceRegistry', 'storageDomain']
+export const inject = ['tools', 'sessions', 'agents', 'sessionQuery', 'sessionPersistence', 'workspaceRegistry', 'storageDomain']
 
-export interface Config {}
+export interface Config {
+  /** Claude Code projects root. Empty means auto-detect `~/.claude/projects`. */
+  claudePath?: string
+}
 
-export const Config = z.object({})
+export const Config = z.object({
+  claudePath: z.string().default(''),
+})
 
-export function apply(ctx: Context, _config: Config): void {
+export function apply(ctx: Context, config: Config): void {
   const services = ctx as unknown as {
     storageDomain: { open(spec: unknown): Promise<unknown> }
     tools: { register(tool: unknown): () => void }
@@ -31,7 +37,10 @@ export function apply(ctx: Context, _config: Config): void {
   }
 
   const manifest = openManifestStore(services.storageDomain)
-  const service = createSessionManagementService(ctx as never, manifest)
+  const service = createSessionManagementService(ctx as never, manifest, {
+    claudePath: resolveClaudeProjectsRoot(config.claudePath),
+    claude: createClaudeSourceReader(),
+  })
 
   ctx.effect(() => () => {
     void manifest.close()

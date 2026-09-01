@@ -33,11 +33,20 @@ export interface ManifestStore {
   getByDsh(dshSessionId: string): Promise<ImportRecord | undefined>
   /** Forward lookup used by import/dedupe slices. */
   getBySource(source: SessionSource, sourceSessionId: string): Promise<ImportRecord | undefined>
+  /** Persist the bidirectional (source, sourceSessionId) <-> dshSessionId index. */
+  put(record: ImportRecord): Promise<void>
   close(): Promise<void>
 }
 
 interface StorageDomainLike {
   open(spec: unknown): Promise<unknown>
+}
+
+/** A write-capable handle for the imports table/unit. */
+interface ManifestTableLike {
+  get(key: string): unknown
+  put?(key: string, value: unknown): unknown
+  set?(key: string, value: unknown): unknown
 }
 
 /**
@@ -55,16 +64,27 @@ export function openManifestStore(storageDomain: StorageDomainLike): ManifestSto
     },
   })
 
-  async function resolveTable(): Promise<{ get(key: string): unknown }> {
+  async function resolveTable(): Promise<ManifestTableLike> {
     const domain = await opening
     const maybeDomain = domain as {
-      table?: (name: string) => { get(key: string): unknown; put?(key: string, value: unknown): unknown }
+      table?: (name: string) => ManifestTableLike
       get?: (key: string) => unknown
+      put?: (key: string, value: unknown) => unknown
+      set?: (key: string, value: unknown) => unknown
     }
     if (typeof maybeDomain.table === 'function') {
       return maybeDomain.table(IMPORTS_TABLE)
     }
-    return { get: (key: string) => maybeDomain.get?.(key) }
+    const table: ManifestTableLike = {
+      get: (key: string) => maybeDomain.get?.(key),
+    }
+    if (typeof maybeDomain.put === 'function') {
+      table.put = (key: string, value: unknown) => maybeDomain.put!(key, value)
+    }
+    if (typeof maybeDomain.set === 'function') {
+      table.set = (key: string, value: unknown) => maybeDomain.set!(key, value)
+    }
+    return table
   }
 
   async function read(key: string): Promise<unknown> {
@@ -73,12 +93,31 @@ export function openManifestStore(storageDomain: StorageDomainLike): ManifestSto
     return value instanceof Promise ? await value : value
   }
 
+  async function write(key: string, value: unknown): Promise<void> {
+    const table = await resolveTable()
+    if (typeof table.put === 'function') {
+      const result = table.put(key, value)
+      if (result instanceof Promise) await result
+      return
+    }
+    if (typeof table.set === 'function') {
+      const result = table.set(key, value)
+      if (result instanceof Promise) await result
+      return
+    }
+    throw new Error('manifest storage unit does not expose a write handle')
+  }
+
   return {
     async getByDsh(dshSessionId: string): Promise<ImportRecord | undefined> {
       return (await read(`dsh:${dshSessionId}`)) as ImportRecord | undefined
     },
     async getBySource(source: SessionSource, sourceSessionId: string): Promise<ImportRecord | undefined> {
       return (await read(`source:${source}:${sourceSessionId}`)) as ImportRecord | undefined
+    },
+    async put(record: ImportRecord): Promise<void> {
+      await write(`source:${record.source}:${record.sourceSessionId}`, record)
+      await write(`dsh:${record.dshSessionId}`, record)
     },
     async close(): Promise<void> {
       const domain = (await opening) as { close?: () => Promise<void> }

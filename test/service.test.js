@@ -139,3 +139,30 @@ test('preview returns official read-session history', async () => {
   assert.equal(preview.updatedAt, 1100)
   await manifest.close()
 })
+
+test('open resumes a cold session through agents.resume', async () => {
+  const { ctx, manifest, service } = setupService()
+  ctx.sessionQuery.readSession = async (id) => ({
+    session: { id, createdAt: 1000, cwd: 'C:/work' },
+    events: [],
+  })
+  ctx.sessions.get = async () => undefined
+
+  const result = await service.open('session-cold')
+
+  assert.deepEqual(result, { sessionId: 'session-cold', resumed: true, alreadyRunning: false, cwd: 'C:/work' })
+  assert.equal(ctx.$calls.agents.filter((call) => call.op === 'resume').length, 1)
+  assert.deepEqual(ctx.$calls.agents.find((call) => call.op === 'resume').args[0], { resumeSessionId: 'session-cold' })
+  await manifest.close()
+})
+
+test('open no-ops for a running session without calling agents.resume', async () => {
+  const { ctx, manifest, service } = setupService()
+  ctx.sessions.get = async () => ({ id: 'session-live' })
+
+  const result = await service.open('session-live')
+
+  assert.deepEqual(result, { sessionId: 'session-live', resumed: false, alreadyRunning: true })
+  assert.equal(ctx.$calls.agents.filter((call) => call.op === 'resume').length, 0)
+  await manifest.close()
+})

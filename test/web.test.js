@@ -85,3 +85,23 @@ test('archive route rejects a missing sessionId', async () => {
   assert.deepEqual(calls, [])
   dispose()
 })
+
+test('open HTTP route calls the service with sessionId', async () => {
+  const calls = []
+  const service = {
+    open: async (sessionId) => {
+      calls.push(['open', sessionId])
+      return { sessionId, resumed: true, alreadyRunning: false }
+    },
+  }
+  const { ctx, route } = captureRoute()
+  const dispose = registerSessionApi(ctx, service)
+  const api = '/@dsh-external/dsh-session-management/api'
+
+  const res = jsonRes()
+  await route().handler(jsonReq(`${api}/open`, { sessionId: 's1' }), res)
+  assert.deepEqual(calls, [['open', 's1']])
+  assert.equal(res.$state.status, 200)
+  assert.deepEqual(JSON.parse(res.$state.body), { sessionId: 's1', resumed: true, alreadyRunning: false })
+  dispose()
+})

@@ -17,7 +17,7 @@ test('session tools are registered and call the service', async () => {
 
   assert.deepEqual(
     ctx.$registeredTools.map((tool) => tool.name),
-    ['list_sessions', 'search_sessions', 'preview_session', 'archive_session', 'unarchive_session'],
+    ['list_sessions', 'search_sessions', 'preview_session', 'archive_session', 'unarchive_session', 'import_sessions'],
   )
 
   const listTool = ctx.$registeredTools.find((tool) => tool.name === 'list_sessions')

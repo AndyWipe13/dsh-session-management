@@ -7,7 +7,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import type { SessionManagementService } from './service.js'
+import type { ImportSelection, SessionManagementService } from './service.js'
 
 interface WebServerLike {
   register(route: {
@@ -109,6 +109,51 @@ export function registerSessionApi(ctx: { webServer?: WebServerLike }, service: 
             return
           }
           const result = await service.preview(id)
+          sendJson(res, 200, result)
+          return
+        }
+
+        if (path === `${API_PREFIX}/open`) {
+          if (req.method !== 'POST') {
+            sendError(res, 405, 'Method not allowed')
+            return
+          }
+          const body = await readJsonBody(req)
+          const sessionId = typeof body.sessionId === 'string'
+            ? body.sessionId
+            : typeof body.id === 'string' ? body.id : undefined
+          if (!sessionId) {
+            sendError(res, 400, 'Missing sessionId')
+            return
+          }
+          const result = await service.open(sessionId)
+          sendJson(res, 200, result)
+          return
+        }
+
+        if (path === `${API_PREFIX}/scan`) {
+          const root = params.get('root') ?? params.get('claudePath') ?? undefined
+          const result = await service.scanClaude(root)
+          sendJson(res, 200, result)
+          return
+        }
+
+        if (path === `${API_PREFIX}/import`) {
+          if (req.method !== 'POST') {
+            sendError(res, 405, 'Method not allowed')
+            return
+          }
+          const body = await readJsonBody(req)
+          const rawTargets = Array.isArray(body.targets) ? body.targets : []
+          const targets: ImportSelection[] = rawTargets
+            .filter((value): value is Record<string, unknown> => typeof value === 'object' && value !== null)
+            .map((value) => ({
+              sourceSessionId: typeof value.sourceSessionId === 'string' ? value.sourceSessionId : '',
+              path: typeof value.path === 'string' ? value.path : undefined,
+            }))
+            .filter((target) => target.sourceSessionId.length > 0)
+          const root = typeof body.root === 'string' ? body.root : undefined
+          const result = await service.importClaude(targets, root)
           sendJson(res, 200, result)
           return
         }

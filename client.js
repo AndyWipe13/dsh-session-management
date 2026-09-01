@@ -115,18 +115,25 @@ window.__ModuleLoader__.load({
           .finally(() => setBusyId(null))
       }, [load])
 
+      const runOpen = useCallback((item) => {
+        setBusyId(item.id)
+        setError(null)
+        setNotice(null)
+        postJson(`${API}/open`, { sessionId: item.id })
+          .then((result) => {
+            setNotice(result.alreadyRunning
+              ? '该会话已在运行中。'
+              : '已打开会话，可继续对话。')
+            if (!result.alreadyRunning) load()
+          })
+          .catch((err) => setError(String(err.message || err)))
+          .finally(() => setBusyId(null))
+      }, [load])
+
       const sourceOptions = ['all', 'dsh', 'claude-code', 'codex']
       const archivedOptions = [['all', '全部'], ['false', '活跃'], ['true', '已归档']]
 
       return React.createElement('div', { style: { padding: '12px', fontFamily: 'sans-serif' } },
-        React.createElement('h2', null, '会话管理'),
-        React.createElement('div', { style: { display: 'flex', gap: '4px', marginBottom: '8px', borderBottom: '1px solid #ccc' } },
-          React.createElement('button', {
-            style: { padding: '4px 12px', fontWeight: 'bold', border: '1px solid #ccc', borderBottom: 'none', background: '#fff', cursor: 'default' },
-          }, '会话'),
-          React.createElement('span', { style: { padding: '4px 12px', color: '#888' } }, '导入（后续切片）'),
-          React.createElement('span', { style: { padding: '4px 12px', color: '#888' } }, '清理与统计（后续切片）'),
-        ),
         React.createElement('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '8px' } },
           React.createElement('input', {
             placeholder: '搜索标题…',
@@ -179,6 +186,14 @@ window.__ModuleLoader__.load({
                   React.createElement('td', { style: { padding: '4px' } },
                     [item.running ? '运行中' : '', item.archived ? '已归档' : ''].filter(Boolean).join(', ') || '—'),
                   React.createElement('td', { style: { padding: '4px' } },
+                    React.createElement('button', {
+                      onClick: (event) => {
+                        event.stopPropagation()
+                        runOpen(item)
+                      },
+                      disabled: busyId === item.id,
+                      style: { padding: '2px 8px', marginRight: '4px' },
+                    }, busyId === item.id ? '处理中…' : item.running ? '切换' : '打开/续聊'),
                     item.archived
                       ? React.createElement('button', {
                           onClick: (event) => {
@@ -208,6 +223,132 @@ window.__ModuleLoader__.load({
       )
     }
 
+    function ImportSection() {
+      const [root, setRoot] = useState('')
+      const [items, setItems] = useState([])
+      const [selected, setSelected] = useState({})
+      const [report, setReport] = useState(null)
+      const [error, setError] = useState(null)
+      const [loading, setLoading] = useState(false)
+
+      const load = useCallback(() => {
+        setLoading(true)
+        setError(null)
+        setReport(null)
+        const params = root ? `?root=${encodeURIComponent(root)}` : ''
+        fetchJson(`${API}/scan${params}`)
+          .then((result) => {
+            setItems(result.items || [])
+            setSelected({})
+          })
+          .catch((err) => setError(String(err.message || err)))
+          .finally(() => setLoading(false))
+      }, [root])
+
+      useEffect(() => {
+        load()
+      }, [load])
+
+      const toggle = useCallback((id) => {
+        setSelected((prev) => ({ ...prev, [id]: !prev[id] }))
+      }, [])
+
+      const toggleAll = useCallback(() => {
+        const allSelected = items.length > 0 && items.every((item) => selected[item.sourceSessionId])
+        const next = {}
+        if (!allSelected) {
+          for (const item of items) next[item.sourceSessionId] = true
+        }
+        setSelected(next)
+      }, [items, selected])
+
+      const runImport = useCallback(() => {
+        const targets = items
+          .filter((item) => selected[item.sourceSessionId])
+          .map((item) => ({ sourceSessionId: item.sourceSessionId, path: item.path }))
+        if (targets.length === 0) return
+        setLoading(true)
+        setError(null)
+        setReport(null)
+        postJson(`${API}/import`, { targets, root: root || undefined })
+          .then(setReport)
+          .catch((err) => setError(String(err.message || err)))
+          .finally(() => setLoading(false))
+      }, [items, selected, root])
+
+      const selectedCount = items.filter((item) => selected[item.sourceSessionId]).length
+      const allSelected = items.length > 0 && items.every((item) => selected[item.sourceSessionId])
+
+      return React.createElement('div', { style: { padding: '12px', fontFamily: 'sans-serif' } },
+        React.createElement('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '8px', alignItems: 'center' } },
+          React.createElement('input', {
+            placeholder: 'Claude 项目目录（留空 = 默认）',
+            value: root,
+            onChange: (event) => setRoot(event.target.value),
+            style: { padding: '4px', minWidth: '260px' },
+          }),
+          React.createElement('button', { onClick: load, disabled: loading }, '扫描'),
+          React.createElement('button', { onClick: toggleAll, disabled: items.length === 0 }, allSelected ? '取消全选' : '全选'),
+          React.createElement('button', {
+            onClick: runImport,
+            disabled: loading || selectedCount === 0,
+            style: { fontWeight: 'bold' },
+          }, `导入所选（${selectedCount}）`),
+        ),
+        error ? React.createElement('div', { style: { color: 'red', marginBottom: '8px' } }, String(error)) : null,
+        report ? React.createElement('div', { style: { marginBottom: '8px', padding: '8px', border: '1px solid #ccc', background: '#f9f9f9' } },
+          React.createElement('h3', { style: { marginTop: 0 } }, `导入报告：成功 ${report.success} / 跳过 ${report.skipped} / 失败 ${report.failed}`),
+          React.createElement('ul', { style: { margin: 0, paddingLeft: '20px' } },
+            (report.items || []).map((item, index) =>
+              React.createElement('li', { key: `${item.sourceSessionId}-${index}` },
+                `${item.sourceSessionId} — ${item.status}${item.dshSessionId ? ` → ${item.dshSessionId}` : ''}${item.reason ? `：${item.reason}` : ''}${item.badLines ? `（坏行 ${item.badLines}）` : ''}`))),
+        ) : null,
+        loading && items.length === 0 ? React.createElement('div', null, '扫描中…') : null,
+        React.createElement('table', { style: { borderCollapse: 'collapse', width: '100%' } },
+          React.createElement('thead', null,
+            React.createElement('tr', null,
+              ['', '标题', '来源', '最后活跃', '大小', '路径'].map((label, index) =>
+                React.createElement('th', { key: index, style: { border: '1px solid #ccc', padding: '4px', textAlign: 'left' } }, label)))),
+          React.createElement('tbody', null,
+            items.length === 0
+              ? React.createElement('tr', null, React.createElement('td', { colSpan: 6, style: { padding: '8px' } }, '没有可导入的 Claude Code 会话'))
+              : items.map((item) =>
+                React.createElement('tr', { key: item.sourceSessionId, style: { border: '1px solid #ccc' } },
+                  React.createElement('td', { style: { padding: '4px' } },
+                    React.createElement('input', {
+                      type: 'checkbox',
+                      checked: Boolean(selected[item.sourceSessionId]),
+                      onChange: () => toggle(item.sourceSessionId),
+                      'aria-label': `选择 ${item.title || item.sourceSessionId}`,
+                    })),
+                  React.createElement('td', { style: { padding: '4px' } }, item.title || item.sourceSessionId),
+                  React.createElement('td', { style: { padding: '4px' } }, sourceLabel(item.source)),
+                  React.createElement('td', { style: { padding: '4px' } }, formatDate(item.updatedAt)),
+                  React.createElement('td', { style: { padding: '4px' } }, formatBytes(item.sizeBytes)),
+                  React.createElement('td', { style: { padding: '4px', fontSize: '12px', wordBreak: 'break-all' } }, item.path),
+                )))),
+      )
+    }
+
+    function SessionManagementSection() {
+      const [tab, setTab] = useState('sessions')
+      return React.createElement('div', null,
+        React.createElement('h2', null, '会话管理'),
+        React.createElement('div', { style: { display: 'flex', gap: '4px', marginBottom: '8px', borderBottom: '1px solid #ccc' } },
+          React.createElement('button', {
+            onClick: () => setTab('sessions'),
+            style: { padding: '4px 12px', fontWeight: tab === 'sessions' ? 'bold' : 'normal', border: '1px solid #ccc', borderBottom: 'none', background: '#fff', cursor: 'pointer' },
+          }, '会话'),
+          React.createElement('button', {
+            onClick: () => setTab('import'),
+            style: { padding: '4px 12px', fontWeight: tab === 'import' ? 'bold' : 'normal', border: '1px solid #ccc', borderBottom: 'none', background: '#fff', cursor: 'pointer' },
+          }, '导入'),
+          React.createElement('span', { style: { padding: '4px 12px', color: '#888' } }, '清理与统计（后续切片）'),
+        ),
+        tab === 'sessions' ? React.createElement(SessionsSection) : React.createElement(ImportSection),
+      )
+    }
+
     const inject = ['slots']
 
     function apply(ctx) {
@@ -217,7 +358,7 @@ window.__ModuleLoader__.load({
           id: 'session-management',
           order: 100,
           label: () => '会话管理',
-        }, SessionsSection),
+        }, SessionManagementSection),
       ), '@dsh-external/dsh-session-management: settings section')
     }
 

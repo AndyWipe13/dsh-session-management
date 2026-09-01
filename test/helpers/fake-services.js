@@ -10,6 +10,7 @@
 /** The official service faces the harness must expose. */
 export const OFFICIAL_SERVICES = [
   'sessions',
+  'agents',
   'sessionQuery',
   'sessionPersistence',
   'workspaceRegistry',
@@ -21,6 +22,7 @@ export const OFFICIAL_SERVICES = [
 export function createFakeContext(overrides = {}) {
   const calls = {
     sessions: [],
+    agents: [],
     sessionQuery: [],
     sessionPersistence: [],
     workspaceRegistry: [],
@@ -70,12 +72,14 @@ export function createFakeContext(overrides = {}) {
       calls.sessions.push({ op: 'prepare', args })
       return { id: 'session-fake', header: { id: 'session-fake' } }
     },
-    enter: () => {
-      calls.sessions.push({ op: 'enter' })
-      return () => {}
+    enter: (session) => {
+      calls.sessions.push({ op: 'enter', args: [session] })
+      return () => {
+        calls.sessions.push({ op: 'enter-dispose', args: [session] })
+      }
     },
-    announce: () => {
-      calls.sessions.push({ op: 'announce' })
+    announce: (session) => {
+      calls.sessions.push({ op: 'announce', args: [session] })
     },
     get: async (id) => {
       calls.sessions.push({ op: 'get', args: [id] })
@@ -88,6 +92,13 @@ export function createFakeContext(overrides = {}) {
     flush: async () => true,
     fork: () => {
       throw new Error('fake fork not implemented')
+    },
+  }
+
+  const agents = {
+    resume: async (options) => {
+      calls.agents.push({ op: 'resume', args: [options] })
+      return { agent: { id: options.resumeSessionId } }
     },
   }
 
@@ -267,6 +278,7 @@ export function createFakeContext(overrides = {}) {
     waterfall: async (_input, next) => next(),
     tools,
     sessions,
+    agents,
     sessionQuery,
     sessionPersistence,
     workspaceRegistry,

@@ -1,14 +1,25 @@
 /**
- * SessionManagement host service — the single test seam for read-path work.
+ * SessionManagement host service — the single test seam for session management.
  *
- * Issue #3 implements `list`, `search`, and `preview`.  The service is a thin
- * composition over the official read services (`sessionQuery`,
- * `sessionPersistence`, `workspaceRegistry`) plus the plugin's import
- * manifest; it deliberately contains no filesystem access so every test can
- * drive it through fakes.
+ * Issues #3/#4 implement list/search/preview/archive/unarchive; issue #5 adds
+ * Claude Code scan/import plus open/resume. The service is a thin composition
+ * over the official services and the plugin's import manifest; it deliberately
+ * contains no filesystem access so every test can drive it through fakes.
  */
 
 import type { ManifestStore, SessionSource } from './manifest.js'
+import type {
+  ClaudeConversionResult,
+  ClaudeSourceReader,
+} from './claude.js'
+import { convertClaudeRecords } from './claude.js'
+
+export interface SessionManagementOptions {
+  /** Configured Claude Code projects root; empty/undefined means caller supplies a path. */
+  claudePath?: string
+  /** Filesystem-facing Claude reader. Defaults are supplied by the plugin entry. */
+  claude?: ClaudeSourceReader
+}
 
 export interface SessionListFilter {
   source?: SessionSource | 'all'
@@ -51,6 +62,55 @@ export interface SessionPreview {
   events: readonly unknown[]
 }
 
+export interface ImportCandidateItem {
+  source: SessionSource
+  sourceSessionId: string
+  path: string
+  title?: string
+  cwd?: string
+  projectName?: string
+  createdAt: number
+  updatedAt: number
+  sizeBytes: number
+  messageCount: number
+  badLines: number
+}
+
+export interface ImportScanResult {
+  items: ImportCandidateItem[]
+  total: number
+  badLines: number
+}
+
+export interface ImportSelection {
+  sourceSessionId: string
+  path?: string
+}
+
+export interface ImportReportItem {
+  sourceSessionId: string
+  path?: string
+  status: 'success' | 'skipped' | 'failed'
+  dshSessionId?: string
+  reason?: string
+  badLines?: number
+}
+
+export interface ImportReport {
+  items: ImportReportItem[]
+  success: number
+  skipped: number
+  failed: number
+}
+
+export interface SessionOpenResult {
+  sessionId: string
+  resumed: boolean
+  alreadyRunning: boolean
+  cwd?: string
+  reason?: string
+}
+
 /** Minimal structural face of the official services the read path needs. */
 export interface SessionServiceContext {
   sessionQuery: {
@@ -73,6 +133,19 @@ export interface SessionServiceContext {
   }
   sessions?: {
     get?(id: string): unknown
+    prepare?(id?: string, options?: {
+      seed?: readonly unknown[]
+      meta?: { cwd?: string; createdAt?: number }
+    }): unknown
+    enter?(session: unknown): () => void
+    announce?(session: unknown): void
+    flush?(session: unknown): Promise<unknown>
+  }
+  agents?: {
+    resume?(options: { resumeSessionId: string }): Promise<unknown>
+  }
+  tools?: {
+    list?(): readonly { name?: string }[]
   }
 }
 
@@ -153,6 +226,7 @@ export class SessionManagementService {
   constructor(
     private readonly ctx: SessionServiceContext,
     private readonly manifest: ManifestStore,
+    private readonly options: SessionManagementOptions = {},
   ) {}
 
   /**
@@ -282,6 +356,201 @@ export class SessionManagementService {
     })
   }
 
+  /**
+   * Open/resume a cold session through the official agent registry resume
+   * path. Running sessions are left untouched.
+   */
+  async open(sessionId: string): Promise<SessionOpenResult> {
+    if (await this.isRunning(sessionId)) {
+      return { sessionId, resumed: false, alreadyRunning: true }
+    }
+
+    if (!this.ctx.agents?.resume) {
+      throw new Error(`agents.resume is unavailable (DSH ${DSH_RC_VERSION})`)
+    }
+
+    const snapshot = await this.ctx.sessionQuery.readSession(sessionId)
+    const normalized = normalizeReadSession(snapshot)
+    await this.ctx.agents.resume({ resumeSessionId: sessionId })
+    return {
+      sessionId,
+      resumed: true,
+      alreadyRunning: false,
+      cwd: normalized.cwd,
+    }
+  }
+
+  /**
+   * Scan the configured (or caller-supplied) Claude Code projects directory
+   * and return only unimported, non-subagent, non-empty main sessions.
+   */
+  async scanClaude(root?: string): Promise<ImportScanResult> {
+    const files = await this.scanClaudeFiles(root)
+    files.sort((a, b) => b.updatedAt - a.updatedAt)
+    return {
+      items: files,
+      total: files.length,
+      badLines: files.reduce((sum, item) => sum + item.badLines, 0),
+    }
+  }
+
+  /**
+   * Import one or more previously scanned Claude Code sessions through the
+   * official session seed path.  Already-imported sessions are skipped; bad
+   * lines are counted and do not abort the whole file.
+   */
+  async importClaude(selections: readonly ImportSelection[], root?: string): Promise<ImportReport> {
+    const reader = this.requireClaude()
+    const scanRoot = root ?? this.options.claudePath
+    if (!scanRoot) {
+      throw new Error('Claude import root is not configured; pass claudePath or scan root')
+    }
+
+    const scanned = await this.scanClaudeFiles(scanRoot)
+    const byId = new Map(scanned.map((item) => [item.sourceSessionId, item]))
+    const items: ImportReportItem[] = []
+
+    for (const selection of selections) {
+      const existing = await this.manifest.getBySource('claude-code', selection.sourceSessionId)
+      if (existing) {
+        items.push({
+          sourceSessionId: selection.sourceSessionId,
+          path: selection.path,
+          status: 'skipped',
+          dshSessionId: existing.dshSessionId,
+          reason: 'Already imported',
+        })
+        continue
+      }
+
+      const candidate = byId.get(selection.sourceSessionId)
+      if (!candidate) {
+        items.push({
+          sourceSessionId: selection.sourceSessionId,
+          path: selection.path,
+          status: 'failed',
+          reason: 'Session is not in the unimported scan queue (already imported, subagent, empty, or not found)',
+        })
+        continue
+      }
+
+      try {
+        const parsed = await reader.readClaudeFile(candidate.path)
+        const conversion = convertClaudeRecords(parsed.records, {
+          knowTool: (name) => this.isKnownTool(name),
+        })
+        const dshSessionId = await this.createImportedSession(conversion)
+        await this.manifest.put({
+          source: 'claude-code',
+          sourceSessionId: candidate.sourceSessionId,
+          dshSessionId,
+          importedAt: Date.now(),
+        })
+        items.push({
+          sourceSessionId: candidate.sourceSessionId,
+          path: candidate.path,
+          status: 'success',
+          dshSessionId,
+          badLines: parsed.badLines,
+        })
+      } catch (error) {
+        items.push({
+          sourceSessionId: candidate.sourceSessionId,
+          path: candidate.path,
+          status: 'failed',
+          reason: error instanceof Error ? error.message : String(error),
+          badLines: 0,
+        })
+      }
+    }
+
+    return {
+      items,
+      success: items.filter((item) => item.status === 'success').length,
+      skipped: items.filter((item) => item.status === 'skipped').length,
+      failed: items.filter((item) => item.status === 'failed').length,
+    }
+  }
+
+  private requireClaude(): ClaudeSourceReader {
+    if (!this.options.claude) {
+      throw new Error('Claude source reader is not configured')
+    }
+    return this.options.claude
+  }
+
+  private async scanClaudeFiles(root: string | undefined): Promise<ImportCandidateItem[]> {
+    const reader = this.requireClaude()
+    const scanRoot = root ?? this.options.claudePath
+    if (!scanRoot) {
+      throw new Error('Claude import root is not configured; pass claudePath or scan root')
+    }
+
+    const files = await reader.listClaudeFiles(scanRoot)
+    const seen = new Map<string, ImportCandidateItem>()
+
+    for (const file of files) {
+      const parsed = await reader.readClaudeFile(file)
+      if (parsed.summary.isSubagent) continue
+      if (!parsed.summary.hasRealUserMessage) continue
+      const existing = await this.manifest.getBySource('claude-code', parsed.summary.sourceSessionId)
+      if (existing) continue
+      if (seen.has(parsed.summary.sourceSessionId)) continue
+
+      const stat = await reader.stat(file)
+      seen.set(parsed.summary.sourceSessionId, {
+        source: 'claude-code',
+        sourceSessionId: parsed.summary.sourceSessionId,
+        path: file,
+        title: parsed.summary.title,
+        cwd: parsed.summary.cwd,
+        projectName: parsed.summary.projectName,
+        createdAt: parsed.summary.createdAt,
+        updatedAt: parsed.summary.updatedAt,
+        sizeBytes: stat.sizeBytes,
+        messageCount: parsed.summary.messageCount,
+        badLines: parsed.badLines,
+      })
+    }
+
+    return [...seen.values()]
+  }
+
+  private isKnownTool(name: string): boolean {
+    const list = this.ctx.tools?.list?.()
+    if (!list) return false
+    return list.some((tool) => tool.name === name)
+  }
+
+  private async createImportedSession(conversion: ClaudeConversionResult): Promise<string> {
+    const sessions = this.ctx.sessions
+    if (
+      !sessions ||
+      typeof sessions.prepare !== 'function' ||
+      typeof sessions.enter !== 'function' ||
+      typeof sessions.announce !== 'function' ||
+      typeof sessions.flush !== 'function'
+    ) {
+      throw new Error('sessions official seed path is unavailable (prepare/enter/announce/flush)')
+    }
+
+    const session = sessions.prepare(conversion.dshSessionId, {
+      seed: conversion.events,
+      meta: {
+        cwd: conversion.header.cwd,
+        createdAt: conversion.header.createdAt,
+      },
+    })
+    const detach = sessions.enter(session)
+    try {
+      sessions.announce(session)
+      await sessions.flush(session)
+    } finally {
+      detach()
+    }
+    return conversion.dshSessionId
+  }
+
   private async sourceOf(id: string): Promise<SessionSource> {
     const record = await this.manifest.getByDsh(id)
     return record?.source ?? 'dsh'
@@ -375,8 +644,9 @@ export class SessionManagementService {
 export function createSessionManagementService(
   ctx: SessionServiceContext,
   manifest: ManifestStore,
+  options: SessionManagementOptions = {},
 ): SessionManagementService {
-  return new SessionManagementService(ctx, manifest)
+  return new SessionManagementService(ctx, manifest, options)
 }
 
 /** Backward-friendly aliases matching the spec's "SessionManagement 服务" naming. */

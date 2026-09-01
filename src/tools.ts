@@ -7,7 +7,7 @@
  */
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { SessionListFilter, SessionManagementService, SessionListItem } from './service.js'
+import type { ImportReport, SessionListFilter, SessionManagementService, SessionListItem } from './service.js'
 
 interface ToolContext {
   tools: {
@@ -43,6 +43,23 @@ function formatPreview(value: Awaited<ReturnType<SessionManagementService['previ
   for (const event of value.events.slice(0, 100)) {
     const e = event as { type?: string; time?: number; data?: unknown }
     lines.push(`- [${e.type ?? 'event'}] ${JSON.stringify(e.data ?? '')}`)
+  }
+  return lines.join('\n')
+}
+
+function formatImportReport(report: ImportReport): string {
+  const lines = [
+    `Import complete: ${report.success} succeeded, ${report.skipped} skipped, ${report.failed} failed.`,
+  ]
+  for (const item of report.items) {
+    const details = [
+      item.path ?? item.sourceSessionId,
+      item.status,
+      item.dshSessionId ? `dsh=${item.dshSessionId}` : '',
+      item.reason ?? '',
+      item.badLines ? `badLines=${item.badLines}` : '',
+    ].filter(Boolean)
+    lines.push(`- ${details.join(' | ')}`)
   }
   return lines.join('\n')
 }
@@ -187,6 +204,32 @@ export function registerSessionTools(ctx: ToolContext, service: SessionManagemen
     async execute(args: { sessionId: string }) {
       await service.unarchive(args.sessionId)
       return { sessionId: args.sessionId, archived: false }
+    },
+  }))
+
+  register(define({
+    name: 'import_sessions',
+    description: 'Import selected Claude Code sessions into DSH as native sessions through the official seed path. Already imported sessions are skipped.',
+    parameters: {
+      sourceSessionIds: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Claude Code session ids to import, from a prior scan of the Claude Code projects directory.',
+        required: true,
+      },
+      root: {
+        type: 'string',
+        description: 'Optional Claude Code projects root to scan. Defaults to plugin configuration.',
+      },
+    },
+    output: {
+      schema: { type: 'json' },
+      render: (_args: unknown, value: ImportReport) => [
+        { type: 'text', text: formatImportReport(value) },
+      ],
+    },
+    async execute(args: { sourceSessionIds: readonly string[]; root?: string }) {
+      return service.importClaude(args.sourceSessionIds.map((sourceSessionId) => ({ sourceSessionId })), args.root)
     },
   }))
 
