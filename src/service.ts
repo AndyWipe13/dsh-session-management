@@ -223,6 +223,20 @@ export interface SessionDeleteResult {
   paths: readonly string[]
 }
 
+/** Session statistics that are stable while a session's updatedAt is stable. */
+interface SessionDetailBase {
+  createdAt: number
+  updatedAt: number
+  sizeBytes: number
+  messageCount: number
+  durationMs: number
+  toolCalls: number
+  toolSuccess: number
+  toolNoResult: number
+  persisted: boolean
+  blank: boolean
+}
+
 export interface SessionArtifactLocation {
   sessionId: string
   path: string
@@ -323,6 +337,55 @@ function normalizeReadSession(value: { session?: unknown; header?: unknown; even
   }
 }
 
+/**
+ * Parse the raw JSONL body returned by `sessionPersistence.readRaw` into the
+ * same event face used by the read path. Header rows and malformed lines are
+ * skipped so this is safe to use as a stats fast path.
+ */
+function parseRawEvents(content: string): { type?: string; time?: number; data?: unknown }[] {
+  const events: { type?: string; time?: number; data?: unknown }[] = []
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    try {
+      const value = JSON.parse(trimmed)
+      if (value && typeof value === 'object' && typeof value.type === 'string') {
+        events.push({
+          type: value.type,
+          time: typeof value.time === 'number' ? value.time : undefined,
+          data: value.data,
+        })
+      }
+    } catch {
+      // Mirror reader-level tolerance: malformed lines do not abort stats.
+    }
+  }
+  return events
+}
+
+/**
+ * Cheap change fingerprint for cached session statistics. The official
+ * session summaries expose an updatedAt projection; when it is present it is
+ * a reliable append-only change signal and lets us skip re-reading events.
+ */
+function recordFingerprint(record: unknown): number | undefined {
+  if (typeof record !== 'object' || record === null) return undefined
+  const obj = record as Record<string, unknown>
+  const header = (obj.header ?? {}) as Record<string, unknown>
+  const candidates = [
+    obj.updatedAt,
+    obj.updated_at,
+    obj.lastActiveAt,
+    header.updatedAt,
+    header.updated_at,
+    header.lastActiveAt,
+  ]
+  for (const candidate of candidates) {
+    if (typeof candidate === 'number' && Number.isFinite(candidate)) return candidate
+  }
+  return undefined
+}
+
 /** One cross-session full-text hit as returned by `sessionQuery.searchSessions`. */
 interface SessionSearchHitLike {
   header?: { id?: string; createdAt?: number; cwd?: string }
@@ -412,11 +475,29 @@ export class SessionManagementService {
   /** In-memory preview snapshots required before cleanup execution can run. */
   private readonly cleanupPreviews = new Map<string, { sessionIds: readonly string[] }>()
 
+  /** Cached per-session statistics keyed by the session's updatedAt fingerprint. */
+  private readonly detailCache = new Map<string, { fingerprint: number; detail: SessionDetailBase }>()
+  private static readonly MAX_DETAIL_CACHE = 1000
+
   constructor(
     private readonly ctx: SessionServiceContext,
     private readonly manifest: ManifestStore,
     private readonly options: SessionManagementOptions = {},
   ) {}
+
+  /** Run async map over a bounded pool to avoid opening unbounded file handles. */
+  private async mapConcurrent<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+    const results = new Array<R>(items.length)
+    let next = 0
+    const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (next < items.length) {
+        const index = next++
+        results[index] = await fn(items[index], index)
+      }
+    })
+    await Promise.all(workers)
+    return results
+  }
 
   /**
    * Unified DSH native + imported session list, newest-active first.
@@ -429,34 +510,33 @@ export class SessionManagementService {
   async list(filters: SessionListFilter = {}): Promise<SessionListResult> {
     const records = await this.ctx.sessionQuery.listSessions()
     const archived = archivedSetOf(this.ctx.workspaceRegistry)
-    const items: SessionListItem[] = []
 
-    for (const raw of records) {
-      if (!isSessionRecord(raw)) continue
+    const mapped = await this.mapConcurrent(records, 16, async (raw): Promise<SessionListItem | null> => {
+      if (!isSessionRecord(raw)) return null
       const id = recordId(raw)
-      if (!id) continue
+      if (!id) return null
       const header = recordHeader(raw)
       const cwd = header?.cwd
 
-      if (filters.cwd && cwd !== filters.cwd) continue
-      if (filters.workspace && !workspaceMatches(cwd, filters.workspace)) continue
+      if (filters.cwd && cwd !== filters.cwd) return null
+      if (filters.workspace && !workspaceMatches(cwd, filters.workspace)) return null
 
       const isArchived = archived.has(id)
       if (filters.archived != null && filters.archived !== 'all' && isArchived !== filters.archived) {
-        continue
+        return null
       }
 
       const source = await this.sourceOf(id)
-      if (filters.source && filters.source !== 'all' && source !== filters.source) continue
+      if (filters.source && filters.source !== 'all' && source !== filters.source) return null
 
       const title = await this.titleOf(id)
       if (filters.query) {
         const q = filters.query.trim().toLowerCase()
-        if (!q || !(title ?? '').toLowerCase().includes(q)) continue
+        if (!q || !(title ?? '').toLowerCase().includes(q)) return null
       }
 
       const detail = await this.detailOf(id, source, isArchived, raw)
-      items.push({
+      return {
         id,
         title,
         source,
@@ -474,9 +554,10 @@ export class SessionManagementService {
         live: detail.live,
         persisted: detail.persisted,
         blank: detail.blank,
-      })
-    }
+      }
+    })
 
+    const items = mapped.filter((item): item is SessionListItem => item !== null)
     items.sort((a, b) => b.updatedAt - a.updatedAt)
     return { items, total: items.length }
   }
@@ -533,18 +614,16 @@ export class SessionManagementService {
     } while (cursor !== undefined)
 
     const archived = archivedSetOf(this.ctx.workspaceRegistry)
-    const items: SessionListItem[] = []
-
-    for (const hit of hits) {
+    const mapped = await this.mapConcurrent(hits, 16, async (hit): Promise<SessionListItem | null> => {
       const id = searchHitId(hit)
-      if (!id || !sessionIds.includes(id)) continue
+      if (!id || !sessionIds.includes(id)) return null
       const header = hit.header
       const cwd = header?.cwd
       const isArchived = archived.has(id)
       const source = await this.sourceOf(id)
       const title = await this.titleOf(id)
       const detail = await this.detailOf(id, source, isArchived, hit)
-      items.push({
+      return {
         id,
         title,
         source,
@@ -563,9 +642,10 @@ export class SessionManagementService {
         persisted: detail.persisted,
         blank: detail.blank,
         snippet: searchHitSnippet(hit),
-      })
-    }
+      }
+    })
 
+    const items = mapped.filter((item): item is SessionListItem => item !== null)
     items.sort((a, b) => b.updatedAt - a.updatedAt)
     return { items, total: items.length }
   }
@@ -1259,56 +1339,118 @@ export class SessionManagementService {
     return normalizeReadSession(snapshot).events as readonly { type?: string; time?: number }[]
   }
 
-  private async detailOf(
-    id: string,
-    _source: SessionSource,
-    _archived: boolean,
-    record: { header?: unknown; live?: boolean; persisted?: boolean; blank?: boolean },
-  ): Promise<{
-    createdAt: number
-    updatedAt: number
-    sizeBytes: number
+  /** Single-pass metrics over an event list; avoids multiple full-array scans. */
+  private computeMetrics(events: readonly { type?: string; time?: number; data?: unknown }[]): {
+    updatedAt: number | undefined
     messageCount: number
     durationMs: number
     toolCalls: number
     toolSuccess: number
     toolNoResult: number
-    running: boolean
-    live: boolean
-    persisted: boolean
     blank: boolean
-  }> {
-    const header = recordHeader(record)
-    const events = await this.eventsOf(id)
-    const createdAt = header?.createdAt ?? 0
-    const updatedAt = this.lastActiveAt(events, createdAt)
-    const messageCount = events.filter((event) => event.type === 'user/message' || event.type === 'assistant/message').length
-    const sizeBytes = await this.sizeOf(id, events)
-    const live = record.live ?? (await this.isRunning(id))
-    const running = record.live ?? live
-    const times = events
-      .map((event) => event.time)
-      .filter((time): time is number => typeof time === 'number')
-    const durationMs = times.length > 0 ? Math.max(0, Math.max(...times) - Math.min(...times)) : 0
-    const toolCalls = events.filter((event) => event.type === 'tool/call').length
-    const toolResults = events.filter((event) => event.type === 'tool/result')
-    const toolSuccess = toolResults.filter((event) => this.isToolResultSuccess(event)).length
-    const toolNoResult = Math.max(0, toolCalls - toolSuccess)
-
+  } {
+    let messageCount = 0
+    let toolCalls = 0
+    let toolSuccess = 0
+    let hasTurnStart = false
+    let minTime: number | undefined
+    let maxTime: number | undefined
+    let lastTime: number | undefined
+    for (const event of events) {
+      const type = event.type
+      if (type === 'user/message' || type === 'assistant/message') messageCount++
+      else if (type === 'tool/call') toolCalls++
+      else if (type === 'tool/result' && this.isToolResultSuccess(event)) toolSuccess++
+      if (type === 'turn/start') hasTurnStart = true
+      const time = event.time
+      if (typeof time === 'number') {
+        if (minTime === undefined || time < minTime) minTime = time
+        if (maxTime === undefined || time > maxTime) maxTime = time
+      }
+      lastTime = event.time
+    }
     return {
-      createdAt,
-      updatedAt,
-      sizeBytes,
+      updatedAt: lastTime,
       messageCount,
-      durationMs,
+      durationMs: minTime === undefined || maxTime === undefined ? 0 : Math.max(0, maxTime - minTime),
       toolCalls,
       toolSuccess,
-      toolNoResult,
-      running,
-      live,
-      persisted: record.persisted ?? true,
-      blank: record.blank === true || !events.some((event) => event.type === 'turn/start'),
+      toolNoResult: Math.max(0, toolCalls - toolSuccess),
+      blank: !hasTurnStart,
     }
+  }
+
+  private async detailOf(
+    id: string,
+    _source: SessionSource,
+    _archived: boolean,
+    record: { header?: unknown; live?: boolean; persisted?: boolean; blank?: boolean },
+  ): Promise<SessionDetailBase & { running: boolean; live: boolean }> {
+    const header = recordHeader(record)
+    const createdAt = header?.createdAt ?? 0
+    const fingerprint = recordFingerprint(record)
+
+    // Fast path: the official summary exposes updatedAt; when unchanged the
+    // session is append-only, so the previous stats are still valid.
+    if (fingerprint !== undefined) {
+      const cached = this.detailCache.get(id)
+      if (cached && cached.fingerprint === fingerprint) {
+        const live = record.live ?? (await this.isRunning(id))
+        return { ...cached.detail, running: record.live ?? live, live }
+      }
+    }
+
+    let events: readonly { type?: string; time?: number; data?: unknown }[] | undefined
+    let sizeBytes: number | undefined
+    const raw = await this.ctx.sessionPersistence?.readRaw?.(id)
+    const rawContent = raw?.content
+    const listEvents = this.ctx.sessionQuery.listEvents
+    if (typeof listEvents === 'function') {
+      const listed = await listEvents(id)
+      if (listed.length > 0) {
+        // listEvents is the official lightweight event face when available.
+        events = listed
+        sizeBytes = rawContent ? Buffer.byteLength(rawContent, 'utf8') : await this.sizeOf(id, listed)
+      }
+    }
+    if (events === undefined) {
+      if (rawContent) {
+        // readRaw fast path: one full JSONL read supplies both metrics and size.
+        events = parseRawEvents(rawContent)
+        sizeBytes = Buffer.byteLength(rawContent, 'utf8')
+      } else {
+        events = await this.eventsOf(id)
+        sizeBytes = await this.sizeOf(id, events)
+      }
+    }
+    if (sizeBytes === undefined) {
+      sizeBytes = await this.sizeOf(id, events)
+    }
+
+    const metrics = this.computeMetrics(events)
+    const live = record.live ?? (await this.isRunning(id))
+    const running = record.live ?? live
+    const detail: SessionDetailBase = {
+      createdAt,
+      updatedAt: metrics.updatedAt ?? createdAt,
+      sizeBytes,
+      messageCount: metrics.messageCount,
+      durationMs: metrics.durationMs,
+      toolCalls: metrics.toolCalls,
+      toolSuccess: metrics.toolSuccess,
+      toolNoResult: metrics.toolNoResult,
+      persisted: record.persisted ?? true,
+      blank: record.blank === true || metrics.blank,
+    }
+
+    if (fingerprint !== undefined) {
+      if (this.detailCache.size >= SessionManagementService.MAX_DETAIL_CACHE) {
+        this.detailCache.clear()
+      }
+      this.detailCache.set(id, { fingerprint, detail })
+    }
+
+    return { ...detail, running, live }
   }
 
   private isToolResultSuccess(event: { type?: string; data?: unknown }): boolean {

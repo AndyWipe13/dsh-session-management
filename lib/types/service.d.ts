@@ -286,7 +286,12 @@ export declare class SessionManagementService {
     private readonly options;
     /** In-memory preview snapshots required before cleanup execution can run. */
     private readonly cleanupPreviews;
+    /** Cached per-session statistics keyed by the session's updatedAt fingerprint. */
+    private readonly detailCache;
+    private static readonly MAX_DETAIL_CACHE;
     constructor(ctx: SessionServiceContext, manifest: ManifestStore, options?: SessionManagementOptions);
+    /** Run async map over a bounded pool to avoid opening unbounded file handles. */
+    private mapConcurrent;
     /**
      * Unified DSH native + imported session list, newest-active first.
      *
@@ -398,6 +403,8 @@ export declare class SessionManagementService {
     private sourceOf;
     private titleOf;
     private eventsOf;
+    /** Single-pass metrics over an event list; avoids multiple full-array scans. */
+    private computeMetrics;
     private detailOf;
     private isToolResultSuccess;
     private sizeOf;
