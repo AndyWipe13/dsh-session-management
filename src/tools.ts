@@ -7,7 +7,17 @@
  */
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { ImportReport, SessionDeleteResult, SessionListFilter, SessionManagementService, SessionListItem } from './service.js'
+import type {
+  CleanupPreviewResult,
+  CleanupReport,
+  CleanupRule,
+  ImportReport,
+  SessionDeleteResult,
+  SessionListFilter,
+  SessionListItem,
+  SessionManagementService,
+  SessionStatsResult,
+} from './service.js'
 
 interface ToolContext {
   tools: {
@@ -73,6 +83,57 @@ function formatDeleteResult(result: SessionDeleteResult): string {
     return `- ${id}${path ? ` at ${path}` : ''}`
   })
   return `Deleted ${result.deletedSessionIds.length} session(s):\n${lines.join('\n')}`
+}
+
+function formatStats(stats: SessionStatsResult): string {
+  const lines = [
+    `Sessions: ${stats.totalSessions}`,
+    `Total size: ${(stats.totalSizeBytes / 1024 / 1024).toFixed(2)} MB`,
+    'By source:',
+    ...stats.bySource.map((entry) => `- ${entry.source}: ${entry.count} session(s), ${(entry.totalSizeBytes / 1024 / 1024).toFixed(2)} MB`),
+    '',
+    'Per session:',
+    ...stats.sessions.map((session) => {
+      const flags = [
+        session.running ? 'running' : '',
+        session.archived ? 'archived' : '',
+        session.blank ? 'blank' : '',
+      ].filter(Boolean).join(',')
+      return `- ${session.title ?? session.id} [${session.source}] updated=${new Date(session.updatedAt).toISOString()} size=${(session.sizeBytes / 1024 / 1024).toFixed(1)}MB messages=${session.messageCount} duration=${session.durationMs}ms tools=${session.toolCalls} (ok=${session.toolSuccess}, noResult=${session.toolNoResult})${flags ? ` (${flags})` : ''}`
+    }),
+  ]
+  return lines.join('\n')
+}
+
+function formatCleanupPreview(preview: CleanupPreviewResult): string {
+  const lines = [
+    `Cleanup preview: ${preview.total} candidate(s), ${(preview.totalSizeBytes / 1024 / 1024).toFixed(2)} MB`,
+    `Rules: olderThanDays=${preview.rules.olderThanDays}, largerThanMb=${preview.rules.largerThanMb}, emptySessions=${preview.rules.emptySessions}, archivedOnly=${preview.rules.archivedOnly}, source=${preview.rules.source}`,
+    `Preview id: ${preview.previewId}`,
+    ...preview.items.map((item) =>
+      `- ${item.title ?? item.id} [${item.source}] size=${(item.sizeBytes / 1024 / 1024).toFixed(1)}MB updated=${new Date(item.updatedAt).toISOString()} matched=${item.matchedRules.join(',')}`),
+  ]
+  if (preview.excluded.length > 0) {
+    lines.push('Excluded running sessions:')
+    for (const item of preview.excluded) lines.push(`- ${item.title ?? item.sessionId}: ${item.reason}`)
+  }
+  return lines.join('\n')
+}
+
+function formatCleanupReport(report: CleanupReport): string {
+  const lines = [
+    `Cleanup complete: ${report.success} succeeded, ${report.failed} failed.`,
+    ...report.items.map((item) => {
+      const details = [
+        item.sessionId,
+        item.status,
+        item.path ?? '',
+        item.reason ?? '',
+      ].filter(Boolean)
+      return `- ${details.join(' | ')}`
+    }),
+  ]
+  return lines.join('\n')
 }
 
 export function registerSessionTools(ctx: ToolContext, service: SessionManagementService): () => void {
@@ -150,6 +211,21 @@ export function registerSessionTools(ctx: ToolContext, service: SessionManagemen
     },
     async execute(args: { query: string } & Omit<SessionListFilter, 'query'>) {
       return service.search(args.query, args)
+    },
+  }))
+
+  register(define({
+    name: 'session_stats',
+    description: 'Show global session statistics (total sessions, total log size, per-source distribution) and per-session metrics (size, messages, duration, tool calls).',
+    parameters: {},
+    output: {
+      schema: { type: 'json' },
+      render: (_args: unknown, value: SessionStatsResult) => [
+        { type: 'text', text: formatStats(value) },
+      ],
+    },
+    async execute() {
+      return service.stats()
     },
   }))
 
@@ -279,6 +355,78 @@ export function registerSessionTools(ctx: ToolContext, service: SessionManagemen
     },
   }))
 
+  register(define({
+    name: 'cleanup_preview_sessions',
+    description: 'Preview sessions that match cleanup rules (age, size, empty, archive state, source). Returns a previewId and candidate list; no session is deleted in this step.',
+    parameters: {
+      olderThanDays: {
+        type: 'number',
+        description: 'Only sessions last active at least this many days ago. Defaults to plugin configuration (30).',
+      },
+      largerThanMb: {
+        type: 'number',
+        description: 'Only sessions with log size larger than this many MB. Defaults to plugin configuration (100).',
+      },
+      emptySessions: {
+        type: 'boolean',
+        description: 'Include sessions with no turn/start event. Defaults to plugin configuration (false).',
+      },
+      archivedOnly: {
+        type: 'boolean',
+        description: 'Only preview archived sessions. Defaults to plugin configuration (true).',
+      },
+      source: {
+        type: 'string',
+        enum: [...sourceEnum, 'all'],
+        description: 'Restrict cleanup to one source or all DSH-side sources.',
+      },
+    },
+    output: {
+      schema: { type: 'json' },
+      render: (_args: unknown, value: CleanupPreviewResult) => [
+        { type: 'text', text: formatCleanupPreview(value) },
+      ],
+    },
+    async execute(args: Partial<CleanupRule> = {}) {
+      return service.cleanupPreview(args)
+    },
+  }))
+
+  register(define({
+    name: 'cleanup_sessions',
+    description: 'Execute a previously previewed cleanup. Requires the previewId from cleanup_preview_sessions, the exact token DELETE, and official user approval; deleted session logs are removed and cannot be recovered.',
+    parameters: {
+      previewId: {
+        type: 'string',
+        description: 'Preview id returned by cleanup_preview_sessions.',
+        required: true,
+      },
+      sessionIds: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'DSH session ids selected from the preview to permanently delete.',
+        required: true,
+      },
+      confirmToken: {
+        type: 'string',
+        description: 'Must equal DELETE to confirm permanent cleanup.',
+        required: true,
+      },
+    },
+    output: {
+      schema: { type: 'json' },
+      render: (_args: unknown, value: CleanupReport) => [
+        { type: 'text', text: formatCleanupReport(value) },
+      ],
+    },
+    async execute(args: { previewId: string; sessionIds: readonly string[]; confirmToken: string }) {
+      return service.cleanupExecute(args.sessionIds, {
+        confirmToken: args.confirmToken,
+        previewId: args.previewId,
+      })
+    },
+  }))
+
   if (typeof ctx.on === 'function') {
     const disposeApproval = ctx.on('tools/pre-execute', async (exec: unknown, next: () => unknown) => {
       const execution = exec as { name?: string; arguments?: { sessionIds?: readonly string[] } } | undefined
@@ -286,6 +434,11 @@ export function registerSessionTools(ctx: ToolContext, service: SessionManagemen
         const targets = execution.arguments?.sessionIds
         const targetText = targets && targets.length > 0 ? targets.join(', ') : 'unknown session(s)'
         return { kind: 'ask', reason: `Permanently delete DSH session(s): ${targetText}. This action cannot be undone.` }
+      }
+      if (execution?.name === 'cleanup_sessions') {
+        const targets = execution.arguments?.sessionIds
+        const targetText = targets && targets.length > 0 ? targets.join(', ') : 'unknown session(s)'
+        return { kind: 'ask', reason: `Permanently delete ${targetText} via cleanup. This action cannot be undone.` }
       }
       return next()
     })

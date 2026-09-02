@@ -39,7 +39,18 @@ test('plugin applies cleanly and registers session tools and settings api', () =
   assert.doesNotThrow(() => apply(ctx, {}))
   assert.deepEqual(
     ctx.$registeredTools.map((tool) => tool.name),
-    ['list_sessions', 'search_sessions', 'preview_session', 'archive_session', 'unarchive_session', 'import_sessions', 'delete_sessions'],
+    [
+      'list_sessions',
+      'search_sessions',
+      'session_stats',
+      'preview_session',
+      'archive_session',
+      'unarchive_session',
+      'import_sessions',
+      'delete_sessions',
+      'cleanup_preview_sessions',
+      'cleanup_sessions',
+    ],
   )
   assert.equal(
     ctx.$registeredTools.some((tool) => tool.name === '_dsh_external_dsh_session_management_hello'),

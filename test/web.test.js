@@ -215,3 +215,91 @@ test('import HTTP route dispatches Codex and Claude imports by body source', asy
   assert.equal(res2.$state.status, 200)
   dispose()
 })
+
+test('stats HTTP route calls service.stats', async () => {
+  const calls = []
+  const service = {
+    stats: async () => {
+      calls.push(['stats'])
+      return { totalSessions: 2, totalSizeBytes: 10, bySource: [], sessions: [] }
+    },
+  }
+  const { ctx, route } = captureRoute()
+  const dispose = registerSessionApi(ctx, service)
+  const api = '/@dsh-external/dsh-session-management/api'
+  const req = (url) => ({ method: 'GET', url, setEncoding() {}, on() {}, destroy() {} })
+  const res = jsonRes()
+  await route().handler(req(`${api}/stats`), res)
+  assert.deepEqual(calls, [['stats']])
+  assert.equal(res.$state.status, 200)
+  assert.deepEqual(JSON.parse(res.$state.body), { totalSessions: 2, totalSizeBytes: 10, bySource: [], sessions: [] })
+  dispose()
+})
+
+test('cleanup preview HTTP route passes parsed rules to service.cleanupPreview', async () => {
+  const calls = []
+  const service = {
+    cleanupPreview: async (rules) => {
+      calls.push(['preview', rules])
+      return { previewId: 'p1', rules, items: [], excluded: [], total: 0, totalSizeBytes: 0 }
+    },
+  }
+  const { ctx, route } = captureRoute()
+  const dispose = registerSessionApi(ctx, service)
+  const api = '/@dsh-external/dsh-session-management/api'
+  const req = (url) => ({ method: 'GET', url, setEncoding() {}, on() {}, destroy() {} })
+  const res = jsonRes()
+  await route().handler(req(`${api}/cleanup/preview?olderThanDays=10&largerThanMb=50&emptySessions=true&archivedOnly=false&source=codex`), res)
+  assert.deepEqual(calls, [['preview', {
+    olderThanDays: 10,
+    largerThanMb: 50,
+    emptySessions: true,
+    archivedOnly: false,
+    source: 'codex',
+  }]])
+  assert.equal(res.$state.status, 200)
+  dispose()
+})
+
+test('cleanup execute HTTP route calls service.cleanupExecute with previewId and confirmToken', async () => {
+  const calls = []
+  const service = {
+    cleanupExecute: async (sessionIds, options) => {
+      calls.push(['execute', sessionIds, options])
+      return { items: sessionIds.map((sessionId) => ({ sessionId, status: 'success' })), success: sessionIds.length, failed: 0 }
+    },
+  }
+  const { ctx, route } = captureRoute()
+  const dispose = registerSessionApi(ctx, service)
+  const api = '/@dsh-external/dsh-session-management/api'
+
+  const res = jsonRes()
+  await route().handler(jsonReq(`${api}/cleanup/execute`, { previewId: 'p1', sessionIds: ['s1', 's2'], confirmToken: 'DELETE' }), res)
+  assert.deepEqual(calls, [['execute', ['s1', 's2'], { confirmToken: 'DELETE', previewId: 'p1' }]])
+  assert.equal(res.$state.status, 200)
+  assert.deepEqual(JSON.parse(res.$state.body), {
+    items: [{ sessionId: 's1', status: 'success' }, { sessionId: 's2', status: 'success' }],
+    success: 2,
+    failed: 0,
+  })
+  dispose()
+})
+
+test('cleanup execute HTTP route rejects missing previewId', async () => {
+  const calls = []
+  const service = {
+    cleanupExecute: async (sessionIds, options) => {
+      calls.push(['execute', sessionIds, options])
+    },
+  }
+  const { ctx, route } = captureRoute()
+  const dispose = registerSessionApi(ctx, service)
+  const api = '/@dsh-external/dsh-session-management/api'
+
+  const res = jsonRes()
+  await route().handler(jsonReq(`${api}/cleanup/execute`, { sessionIds: ['s1'], confirmToken: 'DELETE' }), res)
+  assert.equal(res.$state.status, 400)
+  assert.deepEqual(JSON.parse(res.$state.body), { error: 'Missing previewId' })
+  assert.deepEqual(calls, [])
+  dispose()
+})

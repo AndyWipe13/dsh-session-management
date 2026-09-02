@@ -32,12 +32,30 @@ export interface Config {
    * and falls back to title-only search.
    */
   fullTextSearch?: 'first-search' | 'never'
+  /** Default cleanup rule values used by the 清理与统计 tab and Agent tools. */
+  cleanup?: {
+    olderThanDays?: number
+    largerThanMb?: number
+    emptySessions?: boolean
+    archivedOnly?: boolean
+  }
 }
 
 export const Config = z.object({
   claudePath: z.string().default(''),
   codexPath: z.string().default(''),
   fullTextSearch: z.union(['first-search', 'never']).default('first-search'),
+  cleanup: z.object({
+    olderThanDays: z.number().default(30),
+    largerThanMb: z.number().default(100),
+    emptySessions: z.boolean().default(false),
+    archivedOnly: z.boolean().default(true),
+  }).default({
+    olderThanDays: 30,
+    largerThanMb: 100,
+    emptySessions: false,
+    archivedOnly: true,
+  }),
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -55,6 +73,7 @@ export function apply(ctx: Context, config: Config): void {
     claudePath: resolveClaudeProjectsRoot(config.claudePath),
     codexPath: resolveCodexHome(config.codexPath),
     fullTextSearch: config.fullTextSearch ?? 'first-search',
+    cleanup: config.cleanup,
     claude: createClaudeSourceReader(),
     codex: createCodexSourceReader(),
     deleter: async (location) => {

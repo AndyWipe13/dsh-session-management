@@ -7,7 +7,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import type { ImportSelection, SessionManagementService } from './service.js'
+import type { CleanupRule, ImportSelection, SessionManagementService } from './service.js'
 
 interface WebServerLike {
   register(route: {
@@ -73,6 +73,17 @@ function toBoolean(value: string | null): boolean | 'all' | undefined {
   return value === 'true' || value === '1'
 }
 
+function toNumber(value: string | null): number | undefined {
+  if (value == null || value === '') return undefined
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+function toOptionalBoolean(value: string | null): boolean | undefined {
+  const parsed = toBoolean(value)
+  return parsed === 'all' || parsed === undefined ? undefined : parsed
+}
+
 export function registerSessionApi(ctx: { webServer?: WebServerLike }, service: SessionManagementService): () => void {
   const webServer = ctx.webServer
   if (!webServer || typeof webServer.register !== 'function') return () => {}
@@ -85,6 +96,50 @@ export function registerSessionApi(ctx: { webServer?: WebServerLike }, service: 
         const url = new URL(req.url ?? '/', 'http://localhost')
         const path = url.pathname.replace(/\/+$/, '')
         const params = url.searchParams
+
+        if (path === `${API_PREFIX}/stats`) {
+          const result = await service.stats()
+          sendJson(res, 200, result)
+          return
+        }
+
+        if (path === `${API_PREFIX}/cleanup/preview`) {
+          const rules: Partial<CleanupRule> = {
+            olderThanDays: toNumber(params.get('olderThanDays')),
+            largerThanMb: toNumber(params.get('largerThanMb')),
+            emptySessions: toOptionalBoolean(params.get('emptySessions')),
+            archivedOnly: toOptionalBoolean(params.get('archivedOnly')),
+            source: (params.get('source') as CleanupRule['source'] | null) ?? undefined,
+          }
+          const result = await service.cleanupPreview(rules)
+          sendJson(res, 200, result)
+          return
+        }
+
+        if (path === `${API_PREFIX}/cleanup/execute`) {
+          if (req.method !== 'POST') {
+            sendError(res, 405, 'Method not allowed')
+            return
+          }
+          const body = await readJsonBody(req)
+          const previewId = typeof body.previewId === 'string' ? body.previewId : ''
+          const rawIds = Array.isArray(body.sessionIds) ? body.sessionIds : []
+          const sessionIds = rawIds.filter((value): value is string => typeof value === 'string' && value.length > 0)
+          const confirmToken = typeof body.confirmToken === 'string'
+            ? body.confirmToken
+            : typeof body.token === 'string' ? body.token : undefined
+          if (!previewId) {
+            sendError(res, 400, 'Missing previewId')
+            return
+          }
+          if (sessionIds.length === 0) {
+            sendError(res, 400, 'Missing sessionIds')
+            return
+          }
+          const result = await service.cleanupExecute(sessionIds, { confirmToken, previewId })
+          sendJson(res, 200, result)
+          return
+        }
 
         if (path === `${API_PREFIX}/list` || path === `${API_PREFIX}/search`) {
           const query = params.get('query') ?? params.get('q') ?? undefined

@@ -254,11 +254,11 @@ window.__ModuleLoader__.load({
         React.createElement('table', { style: { borderCollapse: 'collapse', width: '100%' } },
           React.createElement('thead', null,
             React.createElement('tr', null,
-              ['', '标题', '来源', '最后活跃', '大小', '消息数', '状态', '操作'].map((label, index) =>
+              ['', '标题', '来源', '最后活跃', '大小', '消息数', '时长', '状态', '操作'].map((label, index) =>
                 React.createElement('th', { key: label, style: { border: '1px solid #ccc', padding: '4px', textAlign: 'left' } }, label)))),
           React.createElement('tbody', null,
             items.length === 0
-              ? React.createElement('tr', null, React.createElement('td', { colSpan: 8, style: { padding: '8px' } }, '没有会话'))
+              ? React.createElement('tr', null, React.createElement('td', { colSpan: 9, style: { padding: '8px' } }, '没有会话'))
               : items.map((item) =>
                 React.createElement('tr', {
                   key: item.id,
@@ -283,6 +283,7 @@ window.__ModuleLoader__.load({
                   React.createElement('td', { style: { padding: '4px' } }, formatDate(item.updatedAt)),
                   React.createElement('td', { style: { padding: '4px' } }, formatBytes(item.sizeBytes)),
                   React.createElement('td', { style: { padding: '4px' } }, String(item.messageCount)),
+                  React.createElement('td', { style: { padding: '4px' } }, formatDuration(item.durationMs)),
                   React.createElement('td', { style: { padding: '4px' } },
                     [item.running ? '运行中' : '', item.archived ? '已归档' : ''].filter(Boolean).join(', ') || '—'),
                   React.createElement('td', { style: { padding: '4px' } },
@@ -453,6 +454,229 @@ window.__ModuleLoader__.load({
       )
     }
 
+    function formatDuration(ms) {
+      if (ms == null) return '—'
+      if (ms < 1000) return `${ms}ms`
+      const seconds = ms / 1000
+      if (seconds < 60) return `${seconds.toFixed(1)}s`
+      const minutes = seconds / 60
+      if (minutes < 60) return `${minutes.toFixed(1)}m`
+      return `${(minutes / 60).toFixed(1)}h`
+    }
+
+    function CleanupSection() {
+      const [stats, setStats] = useState(null)
+      const [olderThanDays, setOlderThanDays] = useState('30')
+      const [largerThanMb, setLargerThanMb] = useState('100')
+      const [emptySessions, setEmptySessions] = useState(false)
+      const [archivedOnly, setArchivedOnly] = useState(true)
+      const [source, setSource] = useState('all')
+      const [preview, setPreview] = useState(null)
+      const [selected, setSelected] = useState({})
+      const [deleteToken, setDeleteToken] = useState('')
+      const [report, setReport] = useState(null)
+      const [error, setError] = useState(null)
+      const [loading, setLoading] = useState(false)
+
+      const loadStats = useCallback(() => {
+        setLoading(true)
+        setError(null)
+        fetchJson(`${API}/stats`)
+          .then(setStats)
+          .catch((err) => setError(String(err.message || err)))
+          .finally(() => setLoading(false))
+      }, [])
+
+      useEffect(() => {
+        loadStats()
+      }, [loadStats])
+
+      const runPreview = useCallback(() => {
+        const params = new URLSearchParams()
+        if (olderThanDays !== '') params.set('olderThanDays', olderThanDays)
+        if (largerThanMb !== '') params.set('largerThanMb', largerThanMb)
+        params.set('emptySessions', emptySessions ? 'true' : 'false')
+        params.set('archivedOnly', archivedOnly ? 'true' : 'false')
+        if (source !== 'all') params.set('source', source)
+        setLoading(true)
+        setError(null)
+        setReport(null)
+        fetchJson(`${API}/cleanup/preview?${params.toString()}`)
+          .then((value) => {
+            setPreview(value)
+            const next = {}
+            for (const item of value.items || []) next[item.id] = true
+            setSelected(next)
+            setDeleteToken('')
+          })
+          .catch((err) => setError(String(err.message || err)))
+          .finally(() => setLoading(false))
+      }, [olderThanDays, largerThanMb, emptySessions, archivedOnly, source])
+
+      const toggle = useCallback((id) => {
+        setSelected((prev) => ({ ...prev, [id]: !prev[id] }))
+      }, [])
+
+      const previewItems = preview ? preview.items || [] : []
+      const selectedCount = previewItems.filter((item) => selected[item.id]).length
+
+      const runExecute = useCallback(() => {
+        if (!preview || selectedCount === 0) return
+        if (deleteToken !== 'DELETE') {
+          setError('清理必须键入 DELETE 才能执行。')
+          return
+        }
+        const ids = previewItems.filter((item) => selected[item.id]).map((item) => item.id)
+        setLoading(true)
+        setError(null)
+        setReport(null)
+        postJson(`${API}/cleanup/execute`, {
+          previewId: preview.previewId,
+          sessionIds: ids,
+          confirmToken: deleteToken,
+        })
+          .then((value) => {
+            setReport(value)
+            setPreview(null)
+            setSelected({})
+            setDeleteToken('')
+            loadStats()
+          })
+          .catch((err) => setError(String(err.message || err)))
+          .finally(() => setLoading(false))
+      }, [preview, previewItems, selected, selectedCount, deleteToken, loadStats])
+
+      const sourceOptions = ['all', 'dsh', 'claude-code', 'codex']
+
+      return React.createElement('div', { style: { padding: '12px', fontFamily: 'sans-serif' } },
+        React.createElement('h3', { style: { marginTop: 0 } }, '全局统计'),
+        stats ? React.createElement('div', { style: { marginBottom: '12px' } },
+          React.createElement('div', { style: { display: 'flex', gap: '24px', flexWrap: 'wrap', marginBottom: '8px' } },
+            React.createElement('div', null, `会话总数：${stats.totalSessions}`),
+            React.createElement('div', null, `总日志大小：${formatBytes(stats.totalSizeBytes)}`),
+          ),
+          React.createElement('table', { style: { borderCollapse: 'collapse', marginBottom: '8px' } },
+            React.createElement('thead', null,
+              React.createElement('tr', null,
+                ['来源', '会话数', '总大小'].map((label, index) =>
+                  React.createElement('th', { key: index, style: { border: '1px solid #ccc', padding: '4px', textAlign: 'left' } }, label)))),
+            React.createElement('tbody', null,
+              (stats.bySource || []).map((entry) =>
+                React.createElement('tr', { key: entry.source },
+                  React.createElement('td', { style: { border: '1px solid #ccc', padding: '4px' } }, sourceLabel(entry.source)),
+                  React.createElement('td', { style: { border: '1px solid #ccc', padding: '4px' } }, entry.count),
+                  React.createElement('td', { style: { border: '1px solid #ccc', padding: '4px' } }, formatBytes(entry.totalSizeBytes)),
+                )))),
+          React.createElement('details', { style: { marginBottom: '12px' } },
+            React.createElement('summary', null, '查看每会话指标'),
+            React.createElement('table', { style: { borderCollapse: 'collapse', width: '100%', marginTop: '4px' } },
+              React.createElement('thead', null,
+                React.createElement('tr', null,
+                  ['标题', '来源', '大小', '消息数', '时长', '工具调用（成功/无结果）'].map((label, index) =>
+                    React.createElement('th', { key: index, style: { border: '1px solid #ccc', padding: '4px', textAlign: 'left' } }, label)))),
+              React.createElement('tbody', null,
+                (stats.sessions || []).map((session) =>
+                  React.createElement('tr', { key: session.id },
+                    React.createElement('td', { style: { border: '1px solid #ccc', padding: '4px' } }, session.title || session.id),
+                    React.createElement('td', { style: { border: '1px solid #ccc', padding: '4px' } }, sourceLabel(session.source)),
+                    React.createElement('td', { style: { border: '1px solid #ccc', padding: '4px' } }, formatBytes(session.sizeBytes)),
+                    React.createElement('td', { style: { border: '1px solid #ccc', padding: '4px' } }, String(session.messageCount)),
+                    React.createElement('td', { style: { border: '1px solid #ccc', padding: '4px' } }, formatDuration(session.durationMs)),
+                    React.createElement('td', { style: { border: '1px solid #ccc', padding: '4px' } }, `${session.toolCalls}（${session.toolSuccess}/${session.toolNoResult}）`),
+                  ))))),
+        ) : loading ? React.createElement('div', null, '统计加载中…') : null,
+        React.createElement('h3', null, '批量清理规则'),
+        React.createElement('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '8px', alignItems: 'center' } },
+          React.createElement('label', null, '早于（天）',
+            React.createElement('input', {
+              type: 'number',
+              min: '0',
+              value: olderThanDays,
+              onChange: (event) => setOlderThanDays(event.target.value),
+              style: { width: '70px', marginLeft: '4px', padding: '4px' },
+            })),
+          React.createElement('label', null, '大于（MB）',
+            React.createElement('input', {
+              type: 'number',
+              min: '0',
+              value: largerThanMb,
+              onChange: (event) => setLargerThanMb(event.target.value),
+              style: { width: '80px', marginLeft: '4px', padding: '4px' },
+            })),
+          React.createElement('label', null,
+            React.createElement('input', {
+              type: 'checkbox',
+              checked: emptySessions,
+              onChange: (event) => setEmptySessions(event.target.checked),
+            }), '空会话'),
+          React.createElement('label', null,
+            React.createElement('input', {
+              type: 'checkbox',
+              checked: archivedOnly,
+              onChange: (event) => setArchivedOnly(event.target.checked),
+            }), '仅已归档'),
+          React.createElement('select', {
+            value: source,
+            onChange: (event) => setSource(event.target.value),
+            'aria-label': '清理来源筛选',
+          }, sourceOptions.map((value) =>
+            React.createElement('option', { key: value, value }, value === 'all' ? '全部来源' : value))),
+          React.createElement('button', { onClick: runPreview, disabled: loading }, '生成预览'),
+        ),
+        error ? React.createElement('div', { style: { color: 'red', marginBottom: '8px' } }, String(error)) : null,
+        report ? React.createElement('div', { style: { marginBottom: '8px', padding: '8px', border: '1px solid #ccc', background: '#f9f9f9' } },
+          React.createElement('h3', { style: { marginTop: 0 } }, `清理报告：成功 ${report.success} / 失败 ${report.failed}`),
+          React.createElement('ul', { style: { margin: 0, paddingLeft: '20px' } },
+            (report.items || []).map((item, index) =>
+              React.createElement('li', { key: `${item.sessionId}-${index}` },
+                `${item.sessionId} — ${item.status}${item.path ? `（${item.path}）` : ''}${item.reason ? `：${item.reason}` : ''}`))),
+        ) : null,
+        preview ? React.createElement('div', { style: { marginTop: '8px' } },
+          React.createElement('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '8px', alignItems: 'center' } },
+            React.createElement('strong', null, `预览：${preview.total} 个候选，共 ${formatBytes(preview.totalSizeBytes)}`),
+            React.createElement('input', {
+              placeholder: '清理需键入 DELETE',
+              value: deleteToken,
+              onChange: (event) => setDeleteToken(event.target.value),
+              style: { padding: '4px', width: '180px' },
+              'aria-label': '清理确认令牌',
+            }),
+            React.createElement('button', {
+              onClick: runExecute,
+              disabled: selectedCount === 0 || loading,
+              style: { fontWeight: 'bold' },
+            }, `清理所选（${selectedCount}）`),
+          ),
+          (preview.excluded || []).length > 0
+            ? React.createElement('div', { style: { color: '#b00', marginBottom: '8px', fontSize: '12px' } },
+                `已自动排除运行中会话：${preview.excluded.map((item) => item.title || item.sessionId).join('、')}`)
+            : null,
+          React.createElement('table', { style: { borderCollapse: 'collapse', width: '100%' } },
+            React.createElement('thead', null,
+              React.createElement('tr', null,
+                ['', '标题', '来源', '最后活跃', '大小', '匹配规则'].map((label, index) =>
+                  React.createElement('th', { key: index, style: { border: '1px solid #ccc', padding: '4px', textAlign: 'left' } }, label)))),
+            React.createElement('tbody', null,
+              previewItems.length === 0
+                ? React.createElement('tr', null, React.createElement('td', { colSpan: 6, style: { padding: '8px' } }, '没有候选会话'))
+                : previewItems.map((item) =>
+                  React.createElement('tr', { key: item.id, style: { border: '1px solid #ccc' } },
+                    React.createElement('td', { style: { padding: '4px' } },
+                      React.createElement('input', {
+                        type: 'checkbox',
+                        checked: Boolean(selected[item.id]),
+                        onChange: () => toggle(item.id),
+                        'aria-label': `选择 ${item.title || item.id}`,
+                      })),
+                    React.createElement('td', { style: { padding: '4px' } }, item.title || item.id),
+                    React.createElement('td', { style: { padding: '4px' } }, sourceLabel(item.source)),
+                    React.createElement('td', { style: { padding: '4px' } }, formatDate(item.updatedAt)),
+                    React.createElement('td', { style: { padding: '4px' } }, formatBytes(item.sizeBytes)),
+                    React.createElement('td', { style: { padding: '4px' } }, item.matchedRules.join(', ')))))),
+        ) : null,
+      )
+    }
+
     function SessionManagementSection() {
       const [tab, setTab] = useState('sessions')
       return React.createElement('div', null,
@@ -466,9 +690,14 @@ window.__ModuleLoader__.load({
             onClick: () => setTab('import'),
             style: { padding: '4px 12px', fontWeight: tab === 'import' ? 'bold' : 'normal', border: '1px solid #ccc', borderBottom: 'none', background: '#fff', cursor: 'pointer' },
           }, '导入'),
-          React.createElement('span', { style: { padding: '4px 12px', color: '#888' } }, '清理与统计（后续切片）'),
+          React.createElement('button', {
+            onClick: () => setTab('cleanup'),
+            style: { padding: '4px 12px', fontWeight: tab === 'cleanup' ? 'bold' : 'normal', border: '1px solid #ccc', borderBottom: 'none', background: '#fff', cursor: 'pointer' },
+          }, '清理与统计'),
         ),
-        tab === 'sessions' ? React.createElement(SessionsSection) : React.createElement(ImportSection),
+        tab === 'sessions' ? React.createElement(SessionsSection)
+          : tab === 'import' ? React.createElement(ImportSection)
+            : React.createElement(CleanupSection),
       )
     }
 

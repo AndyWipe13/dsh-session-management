@@ -35,6 +35,8 @@ export interface SessionManagementOptions {
   codex?: CodexSourceReader
   /** Filesystem-facing artifact deleter. Defaults are supplied by the plugin entry. */
   deleter?: SessionArtifactDeleter
+  /** Defaults for the cleanup rule form. */
+  cleanup?: Partial<CleanupRule>
 }
 
 export interface SessionListFilter {
@@ -54,6 +56,10 @@ export interface SessionListItem {
   updatedAt: number
   sizeBytes: number
   messageCount: number
+  durationMs: number
+  toolCalls: number
+  toolSuccess: number
+  toolNoResult: number
   running: boolean
   archived: boolean
   live: boolean
@@ -66,6 +72,84 @@ export interface SessionListItem {
 export interface SessionListResult {
   items: SessionListItem[]
   total: number
+}
+
+export interface SessionMetric {
+  id: string
+  title?: string
+  source: SessionSource
+  cwd?: string
+  createdAt: number
+  updatedAt: number
+  sizeBytes: number
+  messageCount: number
+  durationMs: number
+  toolCalls: number
+  toolSuccess: number
+  toolNoResult: number
+  running: boolean
+  archived: boolean
+  blank: boolean
+}
+
+export interface SessionSourceStats {
+  source: SessionSource
+  count: number
+  totalSizeBytes: number
+}
+
+export interface SessionStatsResult {
+  totalSessions: number
+  totalSizeBytes: number
+  bySource: SessionSourceStats[]
+  sessions: SessionMetric[]
+}
+
+export interface CleanupRule {
+  olderThanDays: number
+  largerThanMb: number
+  emptySessions: boolean
+  archivedOnly: boolean
+  source: SessionSource | 'all'
+}
+
+export interface CleanupPreviewItem extends SessionMetric {
+  matchedRules: readonly string[]
+}
+
+export interface CleanupExcludedItem {
+  sessionId: string
+  title?: string
+  reason: string
+}
+
+export interface CleanupPreviewResult {
+  previewId: string
+  rules: CleanupRule
+  items: CleanupPreviewItem[]
+  excluded: CleanupExcludedItem[]
+  total: number
+  totalSizeBytes: number
+}
+
+export interface CleanupExecuteOptions {
+  /** Batch (and tool) cleanup requires the exact token `DELETE`. */
+  confirmToken?: string
+  /** Id returned by cleanupPreview; required so cleanup can never run un-previewed. */
+  previewId?: string
+}
+
+export interface CleanupReportItem {
+  sessionId: string
+  status: 'success' | 'failed'
+  path?: string
+  reason?: string
+}
+
+export interface CleanupReport {
+  items: CleanupReportItem[]
+  success: number
+  failed: number
 }
 
 export interface SessionPreview {
@@ -325,6 +409,9 @@ function isProtectedThirdPartyPath(filePath: string): boolean {
 }
 
 export class SessionManagementService {
+  /** In-memory preview snapshots required before cleanup execution can run. */
+  private readonly cleanupPreviews = new Map<string, { sessionIds: readonly string[] }>()
+
   constructor(
     private readonly ctx: SessionServiceContext,
     private readonly manifest: ManifestStore,
@@ -378,6 +465,10 @@ export class SessionManagementService {
         updatedAt: detail.updatedAt,
         sizeBytes: detail.sizeBytes,
         messageCount: detail.messageCount,
+        durationMs: detail.durationMs,
+        toolCalls: detail.toolCalls,
+        toolSuccess: detail.toolSuccess,
+        toolNoResult: detail.toolNoResult,
         running: detail.running,
         archived: isArchived,
         live: detail.live,
@@ -462,6 +553,10 @@ export class SessionManagementService {
         updatedAt: detail.updatedAt,
         sizeBytes: detail.sizeBytes,
         messageCount: detail.messageCount,
+        durationMs: detail.durationMs,
+        toolCalls: detail.toolCalls,
+        toolSuccess: detail.toolSuccess,
+        toolNoResult: detail.toolNoResult,
         running: detail.running,
         archived: isArchived,
         live: detail.live,
@@ -607,6 +702,193 @@ export class SessionManagementService {
     return {
       deletedSessionIds: ids,
       paths: locations.map((location) => location.path),
+    }
+  }
+
+  /**
+   * Global and per-session statistics.
+   *
+   * This is a read-only walk over the unified session list; it never touches
+   * third-party source files and never writes to any service.
+   */
+  async stats(): Promise<SessionStatsResult> {
+    const result = await this.list()
+    const bySource = new Map<SessionSource, { count: number; totalSizeBytes: number }>([
+      ['dsh', { count: 0, totalSizeBytes: 0 }],
+      ['claude-code', { count: 0, totalSizeBytes: 0 }],
+      ['codex', { count: 0, totalSizeBytes: 0 }],
+    ])
+    const sessions: SessionMetric[] = result.items.map((item) => ({
+      id: item.id,
+      title: item.title,
+      source: item.source,
+      cwd: item.cwd,
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
+      sizeBytes: item.sizeBytes,
+      messageCount: item.messageCount,
+      durationMs: item.durationMs,
+      toolCalls: item.toolCalls,
+      toolSuccess: item.toolSuccess,
+      toolNoResult: item.toolNoResult,
+      running: item.running,
+      archived: item.archived,
+      blank: item.blank,
+    }))
+    for (const session of sessions) {
+      const entry = bySource.get(session.source)!
+      entry.count += 1
+      entry.totalSizeBytes += session.sizeBytes
+    }
+    const bySourceList: SessionSourceStats[] = [...bySource.entries()].map(([source, value]) => ({
+      source,
+      ...value,
+    }))
+    return {
+      totalSessions: sessions.length,
+      totalSizeBytes: sessions.reduce((sum, session) => sum + session.sizeBytes, 0),
+      bySource: bySourceList,
+      sessions,
+    }
+  }
+
+  /**
+   * Generate a cleanup candidate preview from composable rules.
+   *
+   * This phase is strictly read-only: it walks the same unified list as the UI
+   * and records an in-memory preview snapshot.  Running sessions that would
+   * otherwise match are moved to `excluded` with a reason; no session is ever
+   * deleted here.
+   */
+  async cleanupPreview(overrides: Partial<CleanupRule> = {}): Promise<CleanupPreviewResult> {
+    const rules = this.normalizeCleanupRule(overrides)
+    const listResult = await this.list({
+      source: rules.source === 'all' ? undefined : rules.source,
+      archived: rules.archivedOnly ? true : undefined,
+    })
+
+    const items: CleanupPreviewItem[] = []
+    const excluded: CleanupExcludedItem[] = []
+    const now = Date.now()
+    const olderThanMs = rules.olderThanDays > 0 ? rules.olderThanDays * 24 * 60 * 60 * 1000 : 0
+    const largerThanBytes = rules.largerThanMb > 0 ? rules.largerThanMb * 1024 * 1024 : 0
+
+    for (const item of listResult.items) {
+      const matchedRules: string[] = []
+      if (olderThanMs > 0 && now - item.updatedAt >= olderThanMs) matchedRules.push('olderThanDays')
+      if (largerThanBytes > 0 && item.sizeBytes > largerThanBytes) matchedRules.push('largerThanMb')
+      if (rules.emptySessions && item.blank) matchedRules.push('emptySessions')
+      if (matchedRules.length === 0) continue
+
+      if (item.running) {
+        excluded.push({
+          sessionId: item.id,
+          title: item.title,
+          reason: `Running session is never deleted${matchedRules.length > 0 ? ` (matched: ${matchedRules.join(', ')})` : ''}`,
+        })
+        continue
+      }
+
+      items.push({
+        id: item.id,
+        title: item.title,
+        source: item.source,
+        cwd: item.cwd,
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt,
+        sizeBytes: item.sizeBytes,
+        messageCount: item.messageCount,
+        durationMs: item.durationMs,
+        toolCalls: item.toolCalls,
+        toolSuccess: item.toolSuccess,
+        toolNoResult: item.toolNoResult,
+        running: false,
+        archived: item.archived,
+        blank: item.blank,
+        matchedRules,
+      })
+    }
+
+    const previewId = `preview-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+    this.cleanupPreviews.set(previewId, {
+      sessionIds: items.map((item) => item.id),
+    })
+
+    return {
+      previewId,
+      rules,
+      items,
+      excluded,
+      total: items.length,
+      totalSizeBytes: items.reduce((sum, item) => sum + item.sizeBytes, 0),
+    }
+  }
+
+  /**
+   * Execute a previously previewed cleanup.
+   *
+   * Hard gates before any irreversible side effect:
+   * - a live preview id from `cleanupPreview` must be supplied;
+   * - every selected id must belong to that preview;
+   * - the exact confirm token `DELETE` is required;
+   * - running sessions are rejected by the shared delete path.
+   */
+  async cleanupExecute(
+    sessionIds: readonly string[],
+    options: CleanupExecuteOptions = {},
+  ): Promise<CleanupReport> {
+    if (options.confirmToken !== DELETE_CONFIRM_TOKEN) {
+      throw new Error('Cleanup requires the exact token DELETE')
+    }
+    if (!options.previewId) {
+      throw new Error('Cleanup must be previewed before execution')
+    }
+    const preview = this.cleanupPreviews.get(options.previewId)
+    if (!preview) {
+      throw new Error('Cleanup preview is missing or expired; run cleanupPreview again')
+    }
+    this.cleanupPreviews.delete(options.previewId)
+
+    const ids = [...new Set(sessionIds.filter((id): id is string => typeof id === 'string' && id.length > 0))]
+    if (ids.length === 0) {
+      return { items: [], success: 0, failed: 0 }
+    }
+    const notInPreview = ids.filter((id) => !preview.sessionIds.includes(id))
+    if (notInPreview.length > 0) {
+      throw new Error(`Cleanup selection includes sessions not in the latest preview: ${notInPreview.join(', ')}`)
+    }
+
+    try {
+      const result = await this.deleteSessions(ids, { confirmToken: DELETE_CONFIRM_TOKEN })
+      return {
+        items: ids.map((id) => {
+          const path = result.paths[result.deletedSessionIds.indexOf(id)]
+          return {
+            sessionId: id,
+            status: 'success' as const,
+            ...(path ? { path } : {}),
+          }
+        }),
+        success: ids.length,
+        failed: 0,
+      }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      return {
+        items: ids.map((id) => ({ sessionId: id, status: 'failed' as const, reason })),
+        success: 0,
+        failed: ids.length,
+      }
+    }
+  }
+
+  private normalizeCleanupRule(overrides: Partial<CleanupRule>): CleanupRule {
+    return {
+      olderThanDays: overrides.olderThanDays ?? this.options.cleanup?.olderThanDays ?? 30,
+      largerThanMb: overrides.largerThanMb ?? this.options.cleanup?.largerThanMb ?? 100,
+      emptySessions: overrides.emptySessions ?? this.options.cleanup?.emptySessions ?? false,
+      archivedOnly: overrides.archivedOnly ?? this.options.cleanup?.archivedOnly ?? true,
+      source: overrides.source ?? this.options.cleanup?.source ?? 'all',
     }
   }
 
@@ -987,6 +1269,10 @@ export class SessionManagementService {
     updatedAt: number
     sizeBytes: number
     messageCount: number
+    durationMs: number
+    toolCalls: number
+    toolSuccess: number
+    toolNoResult: number
     running: boolean
     live: boolean
     persisted: boolean
@@ -1000,17 +1286,47 @@ export class SessionManagementService {
     const sizeBytes = await this.sizeOf(id, events)
     const live = record.live ?? (await this.isRunning(id))
     const running = record.live ?? live
+    const times = events
+      .map((event) => event.time)
+      .filter((time): time is number => typeof time === 'number')
+    const durationMs = times.length > 0 ? Math.max(0, Math.max(...times) - Math.min(...times)) : 0
+    const toolCalls = events.filter((event) => event.type === 'tool/call').length
+    const toolResults = events.filter((event) => event.type === 'tool/result')
+    const toolSuccess = toolResults.filter((event) => this.isToolResultSuccess(event)).length
+    const toolNoResult = Math.max(0, toolCalls - toolSuccess)
 
     return {
       createdAt,
       updatedAt,
       sizeBytes,
       messageCount,
+      durationMs,
+      toolCalls,
+      toolSuccess,
+      toolNoResult,
       running,
       live,
       persisted: record.persisted ?? true,
-      blank: record.blank ?? events.length === 0,
+      blank: record.blank === true || !events.some((event) => event.type === 'turn/start'),
     }
+  }
+
+  private isToolResultSuccess(event: { type?: string; data?: unknown }): boolean {
+    const data = event.data as
+      | { isError?: unknown; success?: unknown; is_error?: unknown; message?: { content?: readonly unknown[] } }
+      | undefined
+    if (!data) return true
+    if (data.isError === true || data.success === false || data.is_error === true) return false
+    if (typeof data.success === 'boolean') return data.success
+    if (Array.isArray(data.message?.content)) {
+      for (const block of data.message.content) {
+        if (!block || typeof block !== 'object') continue
+        const candidate = block as { is_error?: unknown; success?: unknown }
+        if (candidate.is_error === true || candidate.success === false) return false
+        if (candidate.is_error === false || candidate.success === true) return true
+      }
+    }
+    return true
   }
 
   private async sizeOf(id: string, events: readonly unknown[]): Promise<number> {
