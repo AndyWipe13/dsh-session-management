@@ -38,15 +38,38 @@ npm test            # 运行测试（自动先 build）
 
 夹具位于 `test/fixtures/`，任何测试前后不得修改其字节与 mtime；生成脚本见 `scripts/generate-fixtures.js`。
 
-## 本地装配到 profile
+## 安装到 profile（最终用户）
+
+从 GitHub 一键安装（推荐，无需先拉取源码）：
 
 ```bash
-dsh plugin --profile web add .
+dsh plugin --profile web add github:AndyWipe13/dsh-session-management
 dsh --profile web --dump-config   # 应看到 "# == @dsh-external/dsh-session-management" 层
 dsh web
 ```
 
+卸载：
+
+```bash
+dsh plugin --profile web remove @dsh-external/dsh-session-management
+```
+
+> 本仓库的 `lib/` 构建产物已随 git 提交，因此 `github:` 安装无需 prepare 脚本或 pnpm `allowBuilds` 授权。
 > bundle 成员关系变化需要重启 profile；修改 profile/home 层的 `cordis.patch.yml` 走热重载。
+
+## 开发者：从源码本地装配
+
+只有需要修改插件源码时才使用本地路径装配：
+
+```bash
+npm install
+npm run build
+dsh plugin --profile web add .
+dsh --profile web --dump-config
+dsh web
+```
+
+> `add .` 只用于本地开发调试，不是最终用户的安装方式。
 
 ## 打包与发布
 
@@ -55,7 +78,13 @@ npm pack        # 生成 tgz（可直接 dsh plugin add <tgz>）
 npm publish     # 若发布到 npm（记得先移除/调整 private 字段）
 ```
 
-从 GitHub 直接安装时需确保构建产物随包分发或提供自包含 `prepare` 脚本，详见官方 [Package and install a plugin](https://deepseek-harness.github.io/deepseek-harness/develop/basic/publish.html)。
+分发方式：
+
+- **GitHub 一键安装**：`dsh plugin --profile web add github:AndyWipe13/dsh-session-management`。本仓库已随 git 提交 `lib/` 构建产物，所以不需要 `prepare` 脚本或 pnpm `allowBuilds` 授权。
+- **npm 包**：`dsh plugin --profile web add @dsh-external/dsh-session-management`（发布后可用）。
+- **tarball**：`npm pack` 后执行 `dsh plugin --profile web add ./dsh-external-dsh-session-management-0.0.1.tgz`。
+
+官方安装/发布机制详见 [Package and install a plugin](https://deepseek-harness.github.io/deepseek-harness/develop/basic/publish.html)。
 
 ## 参考
 
