@@ -59,7 +59,7 @@ test('deleteSessions rejects running sessions with zero side effects', async () 
 test('deleteSessions removes the artifact, archived id, workspace registration, and manifest mapping', async () => {
   const { ctx, manifest, service, deletedPaths } = setupService()
   const detached = []
-  const unit = ctx.$openDomains.get('session-management')
+  const unit = ctx.$openDomains.get('session_management')
   await unit.set('dsh:s1', {
     source: 'claude-code',
     sourceSessionId: 'cc-1',

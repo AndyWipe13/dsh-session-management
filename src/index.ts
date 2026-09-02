@@ -19,7 +19,8 @@ import { registerSessionTools } from './tools.js'
 import { registerSessionApi } from './web.js'
 
 export const name = '@dsh-external/dsh-session-management'
-export const inject = ['tools', 'sessions', 'agents', 'sessionQuery', 'sessionPersistence', 'workspaceRegistry', 'storageDomain']
+// webServer must be injected before `ctx.webServer` is reachable in apply().
+export const inject = ['tools', 'sessions', 'agents', 'sessionQuery', 'sessionPersistence', 'workspaceRegistry', 'storageDomain', 'webServer']
 
 export interface Config {
   /** Claude Code projects root. Empty means auto-detect `~/.claude/projects`. */

@@ -42,7 +42,7 @@ test('list returns unified sessions sorted by last active descending', async () 
 
 test('list reverse-looks-up imported source from manifest', async () => {
   const { ctx, manifest, service } = setupService()
-  const unit = ctx.$openDomains.get('session-management')
+  const unit = ctx.$openDomains.get('session_management')
   await unit.set('dsh:session-imported', {
     source: 'claude-code',
     sourceSessionId: 'cc-1',
@@ -64,7 +64,7 @@ test('list reverse-looks-up imported source from manifest', async () => {
 
 test('source, archive-state, and workspace filters combine', async () => {
   const { ctx, manifest, service } = setupService()
-  const unit = ctx.$openDomains.get('session-management')
+  const unit = ctx.$openDomains.get('session_management')
   await unit.set('dsh:codex-1', {
     source: 'codex',
     sourceSessionId: 'cx-1',
@@ -107,7 +107,7 @@ test('title search filters case-insensitively when full-text API is unavailable'
 
 test('content search uses searchSessions, keeps filters, and projects snippet/source', async () => {
   const { ctx, manifest, service } = setupService()
-  const unit = ctx.$openDomains.get('session-management')
+  const unit = ctx.$openDomains.get('session_management')
   await unit.set('dsh:codex-1', {
     source: 'codex',
     sourceSessionId: 'cx-1',
@@ -253,5 +253,25 @@ test('open no-ops for a running session without calling agents.resume', async ()
 
   assert.deepEqual(result, { sessionId: 'session-live', resumed: false, alreadyRunning: true })
   assert.equal(ctx.$calls.agents.filter((call) => call.op === 'resume').length, 0)
+  await manifest.close()
+})
+
+test('durationMs handles a very large event list without stack overflow', async () => {
+  const { ctx, manifest, service } = setupService()
+  const count = 300_000
+  const events = Array.from({ length: count }, (_, i) => ({ type: 'user/message', time: 1000 + i }))
+  ctx.sessionQuery.listSessions = async () => [
+    { header: { id: 'big', createdAt: 1000, cwd: 'C:/work' }, persisted: true, blank: false },
+  ]
+  ctx.sessionQuery.readTitleSnapshots = async (ids) =>
+    ids.map((id) => ({ sessionId: id, status: 'fulfilled', value: { title: 'Big' } }))
+  ctx.sessionQuery.listEvents = async () => events
+  ctx.sessionPersistence.readRaw = async () => ({ content: 'x' }) // keep sizeOf off the reduce path
+
+  const result = await service.list()
+
+  assert.equal(result.total, 1)
+  assert.equal(result.items[0].messageCount, count)
+  assert.equal(result.items[0].durationMs, count - 1)
   await manifest.close()
 })

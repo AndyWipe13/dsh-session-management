@@ -267,6 +267,7 @@ export function registerSessionApi(ctx: { webServer?: WebServerLike }, service: 
 
         sendError(res, 404, 'Not found')
       } catch (error) {
+        console.error('[dsh-session-management] api error:', error)
         sendError(res, 500, error instanceof Error ? error.message : String(error))
       }
     },

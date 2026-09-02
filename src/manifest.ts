@@ -19,7 +19,9 @@ export interface ImportRecord {
   importedAt: number
 }
 
-const MANIFEST_DOMAIN = 'session-management'
+// Storage unit names must match /^[a-z][a-z0-9_]*$/ (dsh-storage validation):
+// underscores, not hyphens.
+const MANIFEST_DOMAIN = 'session_management'
 const MANIFEST_VERSION = 1
 const IMPORTS_TABLE = 'imports'
 
@@ -55,7 +57,7 @@ interface ManifestTableLike {
 }
 
 /**
- * Open the plugin's own `session-management` v1 storage unit.
+ * Open the plugin's own `session_management` v1 storage unit.
  *
  * The returned store is safe to use before the asynchronous open settles:
  * every method awaits the same open promise.

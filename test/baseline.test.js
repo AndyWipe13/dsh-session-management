@@ -11,7 +11,7 @@ const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 
 test('plugin baseline exports shape', () => {
   assert.equal(name, '@dsh-external/dsh-session-management')
-  assert.deepEqual(inject, ['tools', 'sessions', 'agents', 'sessionQuery', 'sessionPersistence', 'workspaceRegistry', 'storageDomain'])
+  assert.deepEqual(inject, ['tools', 'sessions', 'agents', 'sessionQuery', 'sessionPersistence', 'workspaceRegistry', 'storageDomain', 'webServer'])
   assert.equal(typeof apply, 'function')
   assert.ok(Config, 'Config schema should exist for future configuration')
 })

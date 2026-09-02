@@ -22,10 +22,10 @@ test('fake workspaceRegistry records archive calls', async () => {
 
 test('fake storageDomain opens an in-memory unit', async () => {
   const ctx = createFakeContext()
-  const spec = { name: 'session-management', version: 1, tables: {}, globals: {} }
+  const spec = { name: 'session_management', version: 1, tables: {}, globals: {} }
   const unit = await ctx.storageDomain.open(spec)
 
-  assert.equal(ctx.storageDomain.get('session-management'), unit)
+  assert.equal(ctx.storageDomain.get('session_management'), unit)
 
   await unit.set('source:claude-code:id-1', { dshSessionId: 'session-imported-1', importedAt: 1 })
   assert.deepEqual(await unit.get('source:claude-code:id-1'), {
@@ -38,7 +38,7 @@ test('fake storageDomain opens an in-memory unit', async () => {
   assert.equal(await unit.get('source:codex:id-2'), undefined)
 
   await ctx.storageDomain.closeAll()
-  assert.equal(ctx.storageDomain.get('session-management'), undefined)
+  assert.equal(ctx.storageDomain.get('session_management'), undefined)
 })
 
 test('fake tools registers and records tools', () => {

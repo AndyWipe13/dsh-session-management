@@ -254,7 +254,7 @@ export function createFakeContext(overrides = {}) {
     async open(spec) {
       calls.storageDomain.push({ op: 'open', args: [spec] })
       const unit = createFakeDomainUnit(spec)
-      openDomains.set(spec.name ?? 'session-management', unit)
+      openDomains.set(spec.name ?? 'session_management', unit)
       return unit
     },
     get(name) {

@@ -33,7 +33,7 @@ interface StorageDomainLike {
     open(spec: unknown): Promise<unknown>;
 }
 /**
- * Open the plugin's own `session-management` v1 storage unit.
+ * Open the plugin's own `session_management` v1 storage unit.
  *
  * The returned store is safe to use before the asynchronous open settles:
  * every method awaits the same open promise.
