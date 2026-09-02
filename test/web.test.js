@@ -146,6 +146,28 @@ test('open HTTP route calls the service with sessionId', async () => {
   dispose()
 })
 
+test('search HTTP route calls the service with query and combined filters', async () => {
+  const calls = []
+  const service = {
+    search: async (query, filters) => {
+      calls.push([query, filters])
+      return { items: [], total: 0 }
+    },
+  }
+  const { ctx, route } = captureRoute()
+  const dispose = registerSessionApi(ctx, service)
+  const api = '/@dsh-external/dsh-session-management/api'
+
+  const req = (url) => ({ method: 'GET', url, setEncoding() {}, on() {}, destroy() {} })
+  const res = jsonRes()
+  await route().handler(req(`${api}/search?query=needle&source=codex&archived=true&workspace=b`), res)
+
+  assert.deepEqual(calls, [['needle', { source: 'codex', archived: true, cwd: undefined, workspace: 'b', query: 'needle' }]])
+  assert.equal(res.$state.status, 200)
+  assert.deepEqual(JSON.parse(res.$state.body), { items: [], total: 0 })
+  dispose()
+})
+
 test('scan HTTP route dispatches Codex and Claude scans by source', async () => {
   const calls = []
   const service = {

@@ -2,3 +2,8 @@
     - id: session-management
       name: '@dsh-external/dsh-session-management'
       config: {}
+- id: session-query-sqlite
+  name: '@deepseek-ai/dsh-session-query-sqlite'
+  config:
+    path: !!js dshHomePath('storages/session-query.sqlite')
+    openAt: first-search

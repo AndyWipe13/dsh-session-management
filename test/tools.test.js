@@ -7,6 +7,7 @@ import { createFakeContext } from './helpers/fake-services.js'
 
 test('session tools are registered and call the service', async () => {
   const ctx = createFakeContext()
+  ctx.sessionQuery.searchSessions = undefined
   ctx.sessionQuery.listSessions = async () => [
     { header: { id: 's1', createdAt: 1000, cwd: 'C:/work' }, live: false, persisted: true, blank: false },
   ]

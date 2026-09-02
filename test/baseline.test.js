@@ -22,6 +22,18 @@ test('bundle patch points at the built plugin module', () => {
   assert.ok(fs.existsSync(path.join(repoRoot, 'lib', 'index.js')), 'lib/index.js must exist after build')
 })
 
+test('bundle patch enables persistent first-search full-text for session-query-sqlite', () => {
+  const patch = fs.readFileSync(path.join(repoRoot, 'cordis.patch.yml'), 'utf8')
+  assert.match(patch, /id:\s*session-query-sqlite/)
+  assert.match(patch, /name:\s*['"]?@deepseek-ai\/dsh-session-query-sqlite/)
+  assert.match(patch, /path:\s*!!js dshHomePath\('storages\/session-query\.sqlite'\)/)
+  assert.match(patch, /openAt:\s*first-search/)
+  const insertIndex = patch.indexOf('insert')
+  const overlayIndex = patch.indexOf('session-query-sqlite')
+  assert.ok(insertIndex >= 0, 'bundle patch should keep the plugin insert layer')
+  assert.ok(overlayIndex > insertIndex, 'session-query-sqlite overlay should come after the plugin insert layer')
+})
+
 test('plugin applies cleanly and registers session tools and settings api', () => {
   const ctx = createFakeContext()
   assert.doesNotThrow(() => apply(ctx, {}))

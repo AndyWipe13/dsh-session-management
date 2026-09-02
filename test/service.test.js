@@ -5,10 +5,10 @@ import { createFakeContext } from './helpers/fake-services.js'
 import { openManifestStore } from '../lib/manifest.js'
 import { createSessionManagementService } from '../lib/service.js'
 
-function setupService() {
+function setupService(options = {}) {
   const ctx = createFakeContext()
   const manifest = openManifestStore(ctx.storageDomain)
-  const service = createSessionManagementService(ctx, manifest)
+  const service = createSessionManagementService(ctx, manifest, options)
   return { ctx, manifest, service }
 }
 
@@ -88,8 +88,9 @@ test('source, archive-state, and workspace filters combine', async () => {
   await manifest.close()
 })
 
-test('title search filters case-insensitively', async () => {
+test('title search filters case-insensitively when full-text API is unavailable', async () => {
   const { ctx, manifest, service } = setupService()
+  ctx.sessionQuery.searchSessions = undefined
   ctx.sessionQuery.listSessions = async () => [
     { header: { id: 'one', createdAt: 1, cwd: 'C:/a' }, live: false, persisted: true, blank: false },
     { header: { id: 'two', createdAt: 2, cwd: 'C:/b' }, live: false, persisted: true, blank: false },
@@ -99,6 +100,94 @@ test('title search filters case-insensitively', async () => {
   ctx.sessionQuery.listEvents = async () => []
 
   const result = await service.search('alpha')
+  assert.equal(result.total, 1)
+  assert.equal(result.items[0].id, 'one')
+  await manifest.close()
+})
+
+test('content search uses searchSessions, keeps filters, and projects snippet/source', async () => {
+  const { ctx, manifest, service } = setupService()
+  const unit = ctx.$openDomains.get('session-management')
+  await unit.set('dsh:codex-1', {
+    source: 'codex',
+    sourceSessionId: 'cx-1',
+    dshSessionId: 'codex-1',
+    importedAt: 1,
+  })
+
+  ctx.workspaceRegistry.archivedSessionIds = ['codex-1']
+  ctx.sessionQuery.listSessions = async () => [
+    { header: { id: 'codex-1', createdAt: 2000, cwd: 'C:/work/b' }, live: false, persisted: true, blank: false },
+    { header: { id: 'native-1', createdAt: 1000, cwd: 'C:/work/a' }, live: false, persisted: true, blank: false },
+    { header: { id: 'native-2', createdAt: 3000, cwd: 'C:/other/c' }, live: false, persisted: true, blank: false },
+  ]
+  const searchCalls = []
+  ctx.sessionQuery.searchSessions = async (request) => {
+    searchCalls.push(request)
+    return {
+      items: [
+        { header: { id: 'codex-1', createdAt: 2000, cwd: 'C:/work/b' }, live: false, persisted: true, bestMatch: { seq: 3, type: 'assistant/message', time: 2500, snippet: '... found in codex ...' } },
+        { header: { id: 'native-1', createdAt: 1000, cwd: 'C:/work/a' }, live: false, persisted: true, bestMatch: { seq: 1, type: 'user/message', time: 1500, snippet: '... native ...' } },
+        { header: { id: 'native-2', createdAt: 3000, cwd: 'C:/other/c' }, live: false, persisted: true, bestMatch: { seq: 0, type: 'tool/result', time: 3100, snippet: '... other ...' } },
+      ],
+      nextCursor: undefined,
+    }
+  }
+  ctx.sessionQuery.readTitleSnapshots = async (ids) =>
+    ids.map((id) => ({ sessionId: id, status: 'fulfilled', value: { title: `Title ${id}` } }))
+  ctx.sessionQuery.listEvents = async (id) =>
+    id === 'codex-1'
+      ? [{ seq: 3, type: 'assistant/message', time: 2500 }]
+      : [{ seq: 0, type: 'user/message', time: 1500 }]
+
+  const result = await service.search('needle', { source: 'codex', archived: true, workspace: 'b' })
+
+  assert.equal(searchCalls.length, 1)
+  assert.equal(searchCalls[0].query, 'needle')
+  assert.equal(searchCalls[0].limit, 100)
+  assert.deepEqual(searchCalls[0].sessionFilters, [{ kind: 'id', values: ['codex-1'] }])
+  assert.equal(result.total, 1)
+  assert.equal(result.items[0].id, 'codex-1')
+  assert.equal(result.items[0].source, 'codex')
+  assert.equal(result.items[0].snippet, '... found in codex ...')
+  await manifest.close()
+})
+
+test('fullTextSearch never falls back to title search without calling searchSessions', async () => {
+  const { ctx, manifest, service } = setupService({ fullTextSearch: 'never' })
+  let searchCalls = 0
+  ctx.sessionQuery.searchSessions = async () => {
+    searchCalls += 1
+    return { items: [] }
+  }
+  ctx.sessionQuery.listSessions = async () => [
+    { header: { id: 'one', createdAt: 1, cwd: 'C:/a' }, live: false, persisted: true, blank: false },
+    { header: { id: 'two', createdAt: 2, cwd: 'C:/b' }, live: false, persisted: true, blank: false },
+  ]
+  ctx.sessionQuery.readTitleSnapshots = async (ids) =>
+    ids.map((id) => ({ sessionId: id, status: 'fulfilled', value: { title: id === 'one' ? 'Alpha Project' : 'Beta' } }))
+  ctx.sessionQuery.listEvents = async () => []
+
+  const result = await service.search('alpha')
+
+  assert.equal(searchCalls, 0)
+  assert.equal(result.total, 1)
+  assert.equal(result.items[0].id, 'one')
+  await manifest.close()
+})
+
+test('content search falls back to title search when searchSessions is unavailable', async () => {
+  const { ctx, manifest, service } = setupService()
+  ctx.sessionQuery.searchSessions = undefined
+  ctx.sessionQuery.listSessions = async () => [
+    { header: { id: 'one', createdAt: 1, cwd: 'C:/a' }, live: false, persisted: true, blank: false },
+  ]
+  ctx.sessionQuery.readTitleSnapshots = async (ids) =>
+    ids.map((id) => ({ sessionId: id, status: 'fulfilled', value: { title: 'Alpha Project' } }))
+  ctx.sessionQuery.listEvents = async () => []
+
+  const result = await service.search('alpha')
+
   assert.equal(result.total, 1)
   assert.equal(result.items[0].id, 'one')
   await manifest.close()

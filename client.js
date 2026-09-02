@@ -81,9 +81,10 @@ window.__ModuleLoader__.load({
         if (source !== 'all') params.set('source', source)
         if (archived !== 'all') params.set('archived', archived)
         if (workspace) params.set('workspace', workspace)
+        const endpoint = query ? '/search' : '/list'
         setLoading(true)
         setError(null)
-        fetchJson(`${API}/list?${params.toString()}`)
+        fetchJson(`${API}${endpoint}?${params.toString()}`)
           .then((result) => setItems(result.items || []))
           .catch((err) => setError(String(err.message || err)))
           .finally(() => setLoading(false))
@@ -205,7 +206,7 @@ window.__ModuleLoader__.load({
       return React.createElement('div', { style: { padding: '12px', fontFamily: 'sans-serif' } },
         React.createElement('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '8px' } },
           React.createElement('input', {
-            placeholder: '搜索标题…',
+            placeholder: '搜索标题/正文…',
             value: query,
             onChange: (event) => setQuery(event.target.value),
             style: { padding: '4px' },
@@ -248,6 +249,7 @@ window.__ModuleLoader__.load({
         ),
         error ? React.createElement('div', { style: { color: 'red', marginBottom: '8px' } }, String(error)) : null,
         notice ? React.createElement('div', { style: { color: '#1a7f37', marginBottom: '8px' } }, notice) : null,
+        query ? React.createElement('div', { style: { color: '#777', marginBottom: '8px', fontSize: '12px' } }, '首次全文搜索会按需建立索引，可能需要稍候；配置 fullTextSearch: never 可回退标题搜索。') : null,
         loading && !preview ? React.createElement('div', null, '加载中…') : null,
         React.createElement('table', { style: { borderCollapse: 'collapse', width: '100%' } },
           React.createElement('thead', null,
@@ -274,7 +276,9 @@ window.__ModuleLoader__.load({
                       },
                       'aria-label': `选择 ${item.title || item.id}`,
                     })),
-                  React.createElement('td', { style: { padding: '4px' } }, item.title || item.id),
+                  React.createElement('td', { style: { padding: '4px' } },
+                    item.title || item.id,
+                    item.snippet ? React.createElement('div', { style: { fontSize: '12px', color: '#555', whiteSpace: 'pre-wrap' } }, item.snippet) : null),
                   React.createElement('td', { style: { padding: '4px' } }, sourceLabel(item.source)),
                   React.createElement('td', { style: { padding: '4px' } }, formatDate(item.updatedAt)),
                   React.createElement('td', { style: { padding: '4px' } }, formatBytes(item.sizeBytes)),

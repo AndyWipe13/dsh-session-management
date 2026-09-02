@@ -114,7 +114,7 @@ export function createFakeContext(overrides = {}) {
     },
     searchSessions: async (request) => {
       calls.sessionQuery.push({ op: 'searchSessions', args: [request] })
-      return { items: [], cursor: undefined }
+      return { items: [], nextCursor: undefined }
     },
     readSession: async (id) => {
       calls.sessionQuery.push({ op: 'readSession', args: [id] })
@@ -142,7 +142,7 @@ export function createFakeContext(overrides = {}) {
     },
     searchEvents: async (request) => {
       calls.sessionQuery.push({ op: 'searchEvents', args: [request] })
-      return { items: [], cursor: undefined }
+      return { items: [], nextCursor: undefined }
     },
     readSurface: async (id) => {
       calls.sessionQuery.push({ op: 'readSurface', args: [id] })

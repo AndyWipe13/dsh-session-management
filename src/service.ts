@@ -24,6 +24,11 @@ export interface SessionManagementOptions {
   claudePath?: string
   /** Configured Codex home; empty/undefined means caller supplies a path. */
   codexPath?: string
+  /**
+   * Full-text search mode. `first-search` (default) enables content search via
+   * the official searchSessions API; `never` falls back to title-only search.
+   */
+  fullTextSearch?: 'first-search' | 'never'
   /** Filesystem-facing Claude reader. Defaults are supplied by the plugin entry. */
   claude?: ClaudeSourceReader
   /** Filesystem-facing Codex reader. Defaults are supplied by the plugin entry. */
@@ -54,6 +59,8 @@ export interface SessionListItem {
   live: boolean
   persisted: boolean
   blank: boolean
+  /** Plain-text excerpt from the strongest matching event, when available. */
+  snippet?: string
 }
 
 export interface SessionListResult {
@@ -154,6 +161,15 @@ export interface SessionServiceContext {
     readTitle?(id: string): Promise<unknown>
     readTitleSnapshot?(id: string): Promise<{ title?: unknown }>
     readTitleSnapshots?(ids: readonly string[]): Promise<readonly { sessionId?: string; status?: string; value?: unknown }[]>
+    searchSessions?(request: {
+      query: string
+      limit?: number
+      cursor?: unknown
+      sessionFilters?: readonly unknown[]
+    }): Promise<{
+      items?: readonly unknown[]
+      nextCursor?: unknown
+    }>
   }
   sessionPersistence?: {
     readRaw?(id: string): Promise<{ content?: string } | undefined>
@@ -221,6 +237,24 @@ function normalizeReadSession(value: { session?: unknown; header?: unknown; even
     cwd: header?.cwd,
     events: (value.events ?? []) as readonly { type?: string; time?: number; data?: unknown }[],
   }
+}
+
+/** One cross-session full-text hit as returned by `sessionQuery.searchSessions`. */
+interface SessionSearchHitLike {
+  header?: { id?: string; createdAt?: number; cwd?: string }
+  id?: string
+  live?: boolean
+  persisted?: boolean
+  blank?: boolean
+  bestMatch?: { snippet?: string }
+}
+
+function searchHitId(hit: SessionSearchHitLike): string {
+  return hit.header?.id ?? hit.id ?? ''
+}
+
+function searchHitSnippet(hit: SessionSearchHitLike): string | undefined {
+  return hit.bestMatch?.snippet
 }
 
 function workspaceMatches(cwd: string | undefined, workspace: string | undefined): boolean {
@@ -356,9 +390,114 @@ export class SessionManagementService {
     return { items, total: items.length }
   }
 
-  /** Title search over the unified session list, combined with the same filters. */
+  /**
+   * Search the unified session list.
+   *
+   * With `fullTextSearch` left at `first-search` (the default) and the official
+   * `sessionQuery.searchSessions` available, this searches conversation body
+   * text (user/assistant/tool messages) and keeps the same source, archive,
+   * workspace, and cwd filters. When full-text is configured `never` (or the
+   * search API is unavailable) it falls back to the previous title substring
+   * search.
+   */
   async search(query: string, filters: SessionListFilter = {}): Promise<SessionListResult> {
-    return this.list({ ...filters, query })
+    const q = query?.trim() ?? ''
+    if (!q) return this.list(filters)
+    if (this.options.fullTextSearch !== 'never' && typeof this.ctx.sessionQuery.searchSessions === 'function') {
+      return this.searchContent(q, filters)
+    }
+    return this.list({ ...filters, query: q })
+  }
+
+  private async searchContent(query: string, filters: SessionListFilter = {}): Promise<SessionListResult> {
+    const searchSessions = this.ctx.sessionQuery.searchSessions
+    if (typeof searchSessions !== 'function') {
+      return this.list({ ...filters, query })
+    }
+
+    // Apply plugin-owned filters (source, archive state, workspace) to the full
+    // logical corpus first, then ask the official full-text engine to search
+    // only that filtered session pool. This keeps search + filters composable
+    // without dropping matches after a pagination cap.
+    const sessionIds = await this.filteredSessionIds(filters)
+    if (sessionIds.length === 0) return { items: [], total: 0 }
+
+    const sessionFilters: unknown[] = [{ kind: 'id', values: sessionIds }]
+    if (filters.cwd) sessionFilters.push({ kind: 'cwd', values: [filters.cwd] })
+
+    const hits: SessionSearchHitLike[] = []
+    let cursor: unknown
+    do {
+      const page = await searchSessions({
+        query,
+        limit: 100,
+        ...(cursor !== undefined ? { cursor } : {}),
+        sessionFilters,
+      })
+      const pageItems = (page?.items ?? []) as unknown[]
+      for (const raw of pageItems) {
+        if (typeof raw === 'object' && raw !== null) hits.push(raw as SessionSearchHitLike)
+      }
+      cursor = page?.nextCursor
+    } while (cursor !== undefined)
+
+    const archived = archivedSetOf(this.ctx.workspaceRegistry)
+    const items: SessionListItem[] = []
+
+    for (const hit of hits) {
+      const id = searchHitId(hit)
+      if (!id || !sessionIds.includes(id)) continue
+      const header = hit.header
+      const cwd = header?.cwd
+      const isArchived = archived.has(id)
+      const source = await this.sourceOf(id)
+      const title = await this.titleOf(id)
+      const detail = await this.detailOf(id, source, isArchived, hit)
+      items.push({
+        id,
+        title,
+        source,
+        cwd,
+        createdAt: detail.createdAt,
+        updatedAt: detail.updatedAt,
+        sizeBytes: detail.sizeBytes,
+        messageCount: detail.messageCount,
+        running: detail.running,
+        archived: isArchived,
+        live: detail.live,
+        persisted: detail.persisted,
+        blank: detail.blank,
+        snippet: searchHitSnippet(hit),
+      })
+    }
+
+    items.sort((a, b) => b.updatedAt - a.updatedAt)
+    return { items, total: items.length }
+  }
+
+  private async filteredSessionIds(filters: SessionListFilter): Promise<string[]> {
+    const records = await this.ctx.sessionQuery.listSessions()
+    const archived = archivedSetOf(this.ctx.workspaceRegistry)
+    const ids: string[] = []
+
+    for (const raw of records) {
+      if (!isSessionRecord(raw)) continue
+      const id = recordId(raw)
+      if (!id) continue
+      const header = recordHeader(raw)
+      const cwd = header?.cwd
+
+      if (filters.cwd && cwd !== filters.cwd) continue
+      if (filters.workspace && !workspaceMatches(cwd, filters.workspace)) continue
+      const isArchived = archived.has(id)
+      if (filters.archived != null && filters.archived !== 'all' && isArchived !== filters.archived) continue
+      const source = await this.sourceOf(id)
+      if (filters.source && filters.source !== 'all' && source !== filters.source) continue
+
+      ids.push(id)
+    }
+
+    return ids
   }
 
   /** Read one session's history preview through the official read path. */

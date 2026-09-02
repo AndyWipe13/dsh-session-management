@@ -26,7 +26,8 @@ function formatList(items: readonly SessionListItem[], total: number): string {
       item.archived ? 'archived' : '',
     ].filter(Boolean).join(',')
     const sizeMb = (item.sizeBytes / 1024 / 1024).toFixed(1)
-    return `- ${item.title ?? item.id} [${item.source}] updated=${new Date(item.updatedAt).toISOString()} size=${sizeMb}MB messages=${item.messageCount}${flags ? ` (${flags})` : ''}`
+    const snippet = item.snippet ? ` snippet="${item.snippet}"` : ''
+    return `- ${item.title ?? item.id} [${item.source}] updated=${new Date(item.updatedAt).toISOString()} size=${sizeMb}MB messages=${item.messageCount}${flags ? ` (${flags})` : ''}${snippet}`
   })
   return `Found ${total} session(s):\n${lines.join('\n')}`
 }
@@ -120,11 +121,11 @@ export function registerSessionTools(ctx: ToolContext, service: SessionManagemen
 
   register(define({
     name: 'search_sessions',
-    description: 'Search DSH native and imported sessions by title substring, combined with optional filters.',
+    description: 'Search DSH native and imported sessions by conversation body text (user/assistant/tool messages) with snippets, or by title when full-text search is disabled, combined with optional filters.',
     parameters: {
       query: {
         type: 'string',
-        description: 'Title substring to search for.',
+        description: 'Text to search for in conversation body or title (depending on full-text configuration).',
         required: true,
       },
       source: {

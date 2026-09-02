@@ -26,11 +26,18 @@ export interface Config {
   claudePath?: string
   /** Codex home. Empty means auto-detect `~/.codex`. */
   codexPath?: string
+  /**
+   * Full-text search mode. `first-search` enables content search and builds
+   * the SQLite index on the first search; `never` disables full-text indexing
+   * and falls back to title-only search.
+   */
+  fullTextSearch?: 'first-search' | 'never'
 }
 
 export const Config = z.object({
   claudePath: z.string().default(''),
   codexPath: z.string().default(''),
+  fullTextSearch: z.union(['first-search', 'never']).default('first-search'),
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -47,6 +54,7 @@ export function apply(ctx: Context, config: Config): void {
   const service = createSessionManagementService(ctx as never, manifest, {
     claudePath: resolveClaudeProjectsRoot(config.claudePath),
     codexPath: resolveCodexHome(config.codexPath),
+    fullTextSearch: config.fullTextSearch ?? 'first-search',
     claude: createClaudeSourceReader(),
     codex: createCodexSourceReader(),
     deleter: async (location) => {
