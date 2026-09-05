@@ -246,7 +246,9 @@ export type SessionArtifactDeleter = (location: SessionArtifactLocation) => Prom
 
 /** One workspace entity as seen by the deletion cleanup path. */
 export interface SessionWorkspaceLike {
+  path?: string
   sessionIds?: readonly string[]
+  attachSession?(sessionId: string): Promise<void> | void
   detachSession?(sessionId: string): Promise<void> | void
 }
 
@@ -270,10 +272,12 @@ export interface SessionServiceContext {
     }>
   }
   sessionPersistence?: {
+    prepare?(id: string): Promise<{ session: { append(type: string, data: unknown): unknown }; [Symbol.dispose](): void }>
     readRaw?(id: string): Promise<{ content?: string } | undefined>
     locate?(meta: { id: string; cwd?: string; createdAt?: number }): { path?: string } | undefined
   }
   workspaceRegistry?: {
+    create?(path: string): Promise<SessionWorkspaceLike>
     archivedSessionIds?: readonly string[] | Set<string>
     archiveSession?(sessionId: string): Promise<void> | void
     enqueueOperation?(operation: () => Promise<void> | void): Promise<unknown>
@@ -315,7 +319,7 @@ function normalizeTitle(value: unknown): string | undefined {
   if (value == null) return undefined
   if (typeof value === 'string') return value
   const obj = value as { title?: unknown }
-  if (typeof obj.title === 'string') return obj.title
+  if (obj.title != null) return normalizeTitle(obj.title)
   return undefined
 }
 
@@ -582,8 +586,9 @@ export class SessionManagementService {
   }
 
   private async searchContent(query: string, filters: SessionListFilter = {}): Promise<SessionListResult> {
-    const searchSessions = this.ctx.sessionQuery.searchSessions
-    if (typeof searchSessions !== 'function') {
+    // Call through the service object: searchSessions may read instance state,
+    // so a bare unbound reference would drop `this`.
+    if (typeof this.ctx.sessionQuery.searchSessions !== 'function') {
       return this.list({ ...filters, query })
     }
 
@@ -600,7 +605,7 @@ export class SessionManagementService {
     const hits: SessionSearchHitLike[] = []
     let cursor: unknown
     do {
-      const page = await searchSessions({
+      const page = await this.ctx.sessionQuery.searchSessions({
         query,
         limit: 100,
         ...(cursor !== undefined ? { cursor } : {}),
@@ -1055,7 +1060,7 @@ export class SessionManagementService {
         const conversion = convertClaudeRecords(parsed.records, {
           knowTool: (name) => this.isKnownTool(name),
         })
-        const dshSessionId = await this.createImportedSession(conversion)
+        const dshSessionId = await this.createImportedSession(conversion, candidate.title)
         await this.manifest.put({
           source: 'claude-code',
           sourceSessionId: candidate.sourceSessionId,
@@ -1148,7 +1153,7 @@ export class SessionManagementService {
         const conversion = convertCodexRecords(parsed.records, {
           knowTool: (name) => this.isKnownTool(name),
         })
-        const dshSessionId = await this.createImportedSession(conversion)
+        const dshSessionId = await this.createImportedSession(conversion, candidate.title)
         await this.manifest.put({
           source: 'codex',
           sourceSessionId: candidate.sourceSessionId,
@@ -1188,7 +1193,7 @@ export class SessionManagementService {
     return this.options.codex
   }
 
-  private async scanCodexFiles(root: string | undefined): Promise<ImportCandidateItem[]> {
+  private async scanCodexFiles(root: string | undefined, includeImported = false): Promise<ImportCandidateItem[]> {
     const reader = this.requireCodex()
     const scanRoot = root ?? this.options.codexPath
     if (!scanRoot) {
@@ -1203,7 +1208,7 @@ export class SessionManagementService {
       if (parsed.summary.isSubagent) continue
       if (!parsed.summary.hasRealUserMessage) continue
       const existing = await this.manifest.getBySource('codex', parsed.summary.sourceSessionId)
-      if (existing) continue
+      if (existing && !includeImported) continue
       if (seen.has(parsed.summary.sourceSessionId)) continue
 
       const threadTitle = await reader.resolveTitle(scanRoot, parsed.summary.sourceSessionId)
@@ -1234,7 +1239,7 @@ export class SessionManagementService {
     return this.options.claude
   }
 
-  private async scanClaudeFiles(root: string | undefined): Promise<ImportCandidateItem[]> {
+  private async scanClaudeFiles(root: string | undefined, includeImported = false): Promise<ImportCandidateItem[]> {
     const reader = this.requireClaude()
     const scanRoot = root ?? this.options.claudePath
     if (!scanRoot) {
@@ -1249,7 +1254,7 @@ export class SessionManagementService {
       if (parsed.summary.isSubagent) continue
       if (!parsed.summary.hasRealUserMessage) continue
       const existing = await this.manifest.getBySource('claude-code', parsed.summary.sourceSessionId)
-      if (existing) continue
+      if (existing && !includeImported) continue
       if (seen.has(parsed.summary.sourceSessionId)) continue
 
       const stat = await reader.stat(file)
@@ -1277,7 +1282,71 @@ export class SessionManagementService {
     return list.some((tool) => tool.name === name)
   }
 
-  private async createImportedSession(conversion: ClaudeConversionResult | CodexConversionResult): Promise<string> {
+  private async workspaceForImport(cwd: string | undefined): Promise<SessionWorkspaceLike> {
+    if (!cwd) throw new Error('会话缺少工作目录，无法导入到对应工作区')
+    const registry = this.ctx.workspaceRegistry
+    if (!registry?.create) throw new Error('workspaceRegistry.create is unavailable')
+    const workspace = await registry.create(cwd)
+    if (!workspace.attachSession) throw new Error('workspace.attachSession is unavailable')
+    return workspace
+  }
+
+  /** Repair workspace membership for persisted imports created by older versions. */
+  async repairImportedWorkspaces(): Promise<ImportReport> {
+    const items: ImportReportItem[] = []
+    const sources = new Map<SessionSource, Promise<ImportCandidateItem[]>>()
+    for (const raw of await this.ctx.sessionQuery.listSessions()) {
+      if (!isSessionRecord(raw)) continue
+      const id = recordId(raw)
+      const record = await this.manifest.getByDsh(id)
+      if (!record) continue
+      try {
+        const snapshot = normalizeReadSession(await this.ctx.sessionQuery.readSession(id))
+        const workspace = await this.workspaceForImport(snapshot.cwd)
+        await workspace.attachSession!(id)
+        if (!await this.titleOf(id)) {
+          if (!sources.has(record.source)) {
+            sources.set(record.source, record.source === 'claude-code' && this.options.claude && this.options.claudePath
+              ? this.scanClaudeFiles(this.options.claudePath, true)
+              : record.source === 'codex' && this.options.codex && this.options.codexPath
+                ? this.scanCodexFiles(this.options.codexPath, true) : Promise.resolve([]))
+          }
+          const candidate = (await sources.get(record.source)!).find(item => item.sourceSessionId === record.sourceSessionId)
+          if (candidate?.title) await this.restoreImportedTitle(id, candidate.title)
+        }
+        items.push({ sourceSessionId: record.sourceSessionId, dshSessionId: id, status: 'success' })
+      } catch (error) {
+        items.push({ sourceSessionId: record.sourceSessionId, dshSessionId: id, status: 'failed', reason: String(error) })
+      }
+    }
+    return { items, success: items.filter(item => item.status === 'success').length,
+      failed: items.filter(item => item.status === 'failed').length, skipped: 0 }
+  }
+
+  private async restoreImportedTitle(id: string, title: string): Promise<void> {
+    const sessions = this.ctx.sessions
+    if (!sessions?.enter || !sessions.announce || !sessions.flush) throw new Error('sessions official title repair path is unavailable')
+    const live = await sessions.get?.(id) as { append(type: string, data: unknown): unknown } | undefined
+    if (live) {
+      live.append('session/title', { title: title.trim(), messageSeqs: [], source: { kind: 'user' } })
+      await sessions.flush(live)
+      return
+    }
+    if (!this.ctx.sessionPersistence?.prepare) throw new Error('sessionPersistence.prepare is unavailable')
+    const prepared = await this.ctx.sessionPersistence.prepare(id)
+    let detach: (() => void) | undefined
+    try {
+      detach = sessions.enter(prepared.session)
+      sessions.announce(prepared.session)
+      prepared.session.append('session/title', { title: title.trim(), messageSeqs: [], source: { kind: 'user' } })
+      await sessions.flush(prepared.session)
+    } finally {
+      detach?.()
+      prepared[Symbol.dispose]()
+    }
+  }
+
+  private async createImportedSession(conversion: ClaudeConversionResult | CodexConversionResult, title?: string): Promise<string> {
     const sessions = this.ctx.sessions
     if (
       !sessions ||
@@ -1289,8 +1358,15 @@ export class SessionManagementService {
       throw new Error('sessions official seed path is unavailable (prepare/enter/announce/flush)')
     }
 
+    const workspace = await this.workspaceForImport(conversion.header.cwd)
+    const events = [...conversion.events]
+    if (title?.trim()) {
+      const last = events[events.length - 1]
+      events.push({ seq: events.length, type: 'session/title', time: last?.time ?? conversion.header.createdAt,
+        data: { title: title.trim(), messageSeqs: [], source: { kind: 'user' } } })
+    }
     const session = sessions.prepare(conversion.dshSessionId, {
-      seed: conversion.events,
+      seed: events,
       meta: {
         cwd: conversion.header.cwd,
         createdAt: conversion.header.createdAt,
@@ -1300,6 +1376,7 @@ export class SessionManagementService {
     try {
       sessions.announce(session)
       await sessions.flush(session)
+      await workspace.attachSession!(conversion.dshSessionId)
     } finally {
       detach()
     }
@@ -1404,9 +1481,10 @@ export class SessionManagementService {
     let sizeBytes: number | undefined
     const raw = await this.ctx.sessionPersistence?.readRaw?.(id)
     const rawContent = raw?.content
-    const listEvents = this.ctx.sessionQuery.listEvents
-    if (typeof listEvents === 'function') {
-      const listed = await listEvents(id)
+    // Call through the service object: `listEvents` reads `this._corpus`, so a
+    // bare `const listEvents = ...` unbound call would crash.
+    if (typeof this.ctx.sessionQuery.listEvents === 'function') {
+      const listed = await this.ctx.sessionQuery.listEvents(id)
       if (listed.length > 0) {
         // listEvents is the official lightweight event face when available.
         events = listed
@@ -1486,13 +1564,13 @@ export class SessionManagementService {
   }
 
   private async locateDeletionTarget(id: string): Promise<SessionArtifactLocation> {
-    const locate = this.ctx.sessionPersistence?.locate
-    if (typeof locate !== 'function') {
+    const persistence = this.ctx.sessionPersistence
+    if (typeof persistence?.locate !== 'function') {
       throw new Error(`sessionPersistence.locate is unavailable; cannot delete session ${id}`)
     }
     const snapshot = await this.ctx.sessionQuery.readSession(id)
     const normalized = normalizeReadSession(snapshot)
-    const location = locate({
+    const location = persistence.locate({
       id,
       ...(normalized.cwd ? { cwd: normalized.cwd } : {}),
       ...(normalized.createdAt ? { createdAt: normalized.createdAt } : {}),

@@ -239,7 +239,11 @@ export function createFakeContext(overrides = {}) {
     },
     create: async (path, title) => {
       calls.workspaceRegistry.push({ op: 'create', args: [path, title] })
-      return { id: 'workspace-fake', path, title, sessionIds: [] }
+      const sessionIds = []
+      return { id: 'workspace-fake', path, title, sessionIds, attachSession: async (id) => {
+        calls.workspaceRegistry.push({ op: 'attachSession', args: [id, path] })
+        if (!sessionIds.includes(id)) sessionIds.push(id)
+      } }
     },
     get: () => undefined,
     list: () => [],

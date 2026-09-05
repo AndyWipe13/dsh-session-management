@@ -197,7 +197,9 @@ export interface SessionArtifactLocation {
 export type SessionArtifactDeleter = (location: SessionArtifactLocation) => Promise<void> | void;
 /** One workspace entity as seen by the deletion cleanup path. */
 export interface SessionWorkspaceLike {
+    path?: string;
     sessionIds?: readonly string[];
+    attachSession?(sessionId: string): Promise<void> | void;
     detachSession?(sessionId: string): Promise<void> | void;
 }
 /** Minimal structural face of the official services the read path needs. */
@@ -233,6 +235,12 @@ export interface SessionServiceContext {
         }>;
     };
     sessionPersistence?: {
+        prepare?(id: string): Promise<{
+            session: {
+                append(type: string, data: unknown): unknown;
+            };
+            [Symbol.dispose](): void;
+        }>;
         readRaw?(id: string): Promise<{
             content?: string;
         } | undefined>;
@@ -245,6 +253,7 @@ export interface SessionServiceContext {
         } | undefined;
     };
     workspaceRegistry?: {
+        create?(path: string): Promise<SessionWorkspaceLike>;
         archivedSessionIds?: readonly string[] | Set<string>;
         archiveSession?(sessionId: string): Promise<void> | void;
         enqueueOperation?(operation: () => Promise<void> | void): Promise<unknown>;
@@ -399,6 +408,10 @@ export declare class SessionManagementService {
     private requireClaude;
     private scanClaudeFiles;
     private isKnownTool;
+    private workspaceForImport;
+    /** Repair workspace membership for persisted imports created by older versions. */
+    repairImportedWorkspaces(): Promise<ImportReport>;
+    private restoreImportedTitle;
     private createImportedSession;
     private sourceOf;
     private titleOf;

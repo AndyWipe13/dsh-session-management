@@ -38,6 +38,10 @@ npm test            # 运行测试（自动先 build）
 
 夹具位于 `test/fixtures/`，任何测试前后不得修改其字节与 mtime；生成脚本见 `scripts/generate-fixtures.js`。
 
+导入按源会话的 `cwd` 创建或复用官方工作区，日志持久化后再登记会话成员，并将扫描页标题保存为 `session/title` 事件。工作目录不存在时会报告导入失败。旧版本已导入但未分组的会话，可在会话页点击「修复导入工作区」补全登记与缺失标题；已有标题不会覆盖，原会话 ID 与历史保持不变。rc.7 侧栏需要刷新页面同步。
+
+宿主接口回归位于 `test/host-contract.test.js`，覆盖官方标题的 `value.title.title` 嵌套、持久化后的工作区登记，以及旧导入修复的准备对象释放。`scripts/check-session-ui.cjs` 接收 Playwright `page` 和临时会话的 `{ sessionId, title }`，验证勾选、归档、取消归档、取消删除和实际删除；仅对可丢弃测试会话运行。
+
 ## 安装到 profile（最终用户）
 
 从 GitHub 一键安装（推荐，无需先拉取源码）：

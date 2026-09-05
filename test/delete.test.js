@@ -42,6 +42,16 @@ test('deleteSessions requires the exact DELETE token and performs zero side effe
   await manifest.close()
 })
 
+test('delete preserves the official persistence receiver when locating artifacts', async () => {
+  const { ctx, manifest, service } = setupService()
+  await seedSession(ctx, 's1')
+  ctx.sessionPersistence.root = 'C:/fake/sessions'
+  ctx.sessionPersistence.locate = function (meta) { return { path: `${this.root}/${meta.id}/session.jsonl` } }
+  try {
+    assert.deepEqual((await service.deleteSessions(['s1'], { confirmToken: 'DELETE' })).paths, ['C:/fake/sessions/s1/session.jsonl'])
+  } finally { await manifest.close() }
+})
+
 test('deleteSessions rejects running sessions with zero side effects', async () => {
   const { ctx, manifest, service, deletedPaths } = setupService()
   await seedSession(ctx, 's1')

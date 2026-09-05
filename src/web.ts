@@ -97,6 +97,12 @@ export function registerSessionApi(ctx: { webServer?: WebServerLike }, service: 
         const path = url.pathname.replace(/\/+$/, '')
         const params = url.searchParams
 
+        if (path === `${API_PREFIX}/repair-workspaces`) {
+          if (req.method !== 'POST') { sendError(res, 405, 'Method not allowed'); return }
+          sendJson(res, 200, await service.repairImportedWorkspaces())
+          return
+        }
+
         if (path === `${API_PREFIX}/stats`) {
           const result = await service.stats()
           sendJson(res, 200, result)

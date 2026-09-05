@@ -25,10 +25,36 @@ const MANIFEST_DOMAIN = 'session_management'
 const MANIFEST_VERSION = 1
 const IMPORTS_TABLE = 'imports'
 
-/** Minimal schema-like object satisfying storage-domain's runtime `safeParse` use. */
-const passthroughSchema = {
-  safeParse: (value: unknown) => ({ success: true, data: value }),
-} as never
+/**
+ * Runtime record validation for the imports table.
+ *
+ * The storage-domain facility calls `valueSchema.parse(raw)` (zod-style,
+ * throwing) on every stored record when it reopens the unit, so this schema
+ * must actually validate — a passthrough that only implements `safeParse`
+ * turns the first stored record into a fatal `invalid-record` load failure.
+ * Extras are tolerated so older records keep loading across additive
+ * changes; the four contract fields are checked strictly.
+ */
+const importRecordSchema = {
+  parse(value: unknown): ImportRecord {
+    if (typeof value !== 'object' || value === null) {
+      throw new TypeError('import record must be an object')
+    }
+    const v = value as Record<string, unknown>
+    if (v.source !== 'dsh' && v.source !== 'claude-code' && v.source !== 'codex') {
+      throw new TypeError(`import record source must be dsh|claude-code|codex, got ${String(v.source)}`)
+    }
+    for (const key of ['sourceSessionId', 'dshSessionId'] as const) {
+      if (typeof v[key] !== 'string' || (v[key] as string) === '') {
+        throw new TypeError(`import record ${key} must be a non-empty string`)
+      }
+    }
+    if (typeof v.importedAt !== 'number' || !Number.isFinite(v.importedAt)) {
+      throw new TypeError('import record importedAt must be a finite number')
+    }
+    return value as ImportRecord
+  },
+}
 
 export interface ManifestStore {
   /** Reverse lookup: DSH session id -> import record (undefined = native DSH). */
@@ -67,7 +93,7 @@ export function openManifestStore(storageDomain: StorageDomainLike): ManifestSto
     name: MANIFEST_DOMAIN,
     version: MANIFEST_VERSION,
     tables: {
-      [IMPORTS_TABLE]: { valueSchema: passthroughSchema },
+      [IMPORTS_TABLE]: { valueSchema: importRecordSchema },
     },
   })
 
