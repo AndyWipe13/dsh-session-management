@@ -1,0 +1,9 @@
+- insert:
+    - id: session-management
+      name: '@nathan110628/dsh-session-management'
+      config: {}
+- id: session-query-sqlite
+  name: '@deepseek-ai/dsh-session-query-sqlite'
+  config:
+    path: !!js dshHomePath('storages/session-query.sqlite')
+    openAt: first-search

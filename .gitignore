@@ -1,0 +1,8 @@
+node_modules/
+*.tsbuildinfo
+*.tgz
+.agents/
+.debug/
+.playwright-mcp/
+docs/
+CONTEXT.md
